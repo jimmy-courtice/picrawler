@@ -13,8 +13,8 @@ Smoothed gait demo for PiCrawler.
   # A bit smoother, still quick:
   sudo python3 -m smooth_gait.demo_crawl --segments 2 --speed 100 --cycles 3
 
-  # Compare stock vs smooth:
-  sudo python3 -m smooth_gait.demo_crawl --mode compare --cycles 2
+  # Compare stock vs smooth (3 steps each):
+  sudo python3 -m smooth_gait.demo_crawl --mode compare
 """
 
 from __future__ import annotations
@@ -66,14 +66,16 @@ def main() -> int:
             print("2) Body sway")
             gait.demo_body_sway()
         elif args.mode == "compare" and not dry:
-            print("2) Stock forward @ speed 60")
-            for i in range(args.cycles):
-                print(f"  stock step {i + 1}/{args.cycles}")
+            # Always 3 steps per mode for a fair side-by-side (ignore --cycles)
+            steps = 3
+            print(f"2) Stock forward @ speed 60  ({steps} steps)")
+            for i in range(steps):
+                print(f"  stock step {i + 1}/{steps}")
                 crawler.do_action("forward", 1, 60)
             time.sleep(0.5)
-            print("3) Smoothed forward")
+            print(f"3) Smoothed forward  ({steps} steps)")
             gait._sync_move_list_standing(True)
-            gait.crawl_forward(cycles=args.cycles)
+            gait.crawl_forward(cycles=steps)
         else:
             if dry:
                 print("2) Dry-run skip walk")
