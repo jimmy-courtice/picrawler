@@ -154,40 +154,61 @@ class SmoothGait:
     def move_body(self, dx: float = 0.0, dy: float = 0.0, dz: float = 0.0, step_mm: Optional[float] = None) -> None:
         self.move_feet_relatively(body_foot_deltas(dx, dy, dz), step_mm=step_mm)
 
+    def _sync_move_list_standing(self, standing: bool) -> None:
+        """
+        Picrawler.__init__ builds step_list by evaluating stand then sit, which
+        leaves move_list.z_current at Z_UP. do_step('stand'/'sit') uses those
+        cached poses and never updates z_current — so check_stand keeps
+        injecting a full stand animation into every gait. Keep the flag in sync.
+        """
+        ml = getattr(self.crawler, "move_list", None)
+        if ml is None:
+            return
+        if standing:
+            ml.z_current = ml.Z_DEFAULT
+            ml.ready_state = 1
+        else:
+            ml.z_current = ml.Z_UP
+
     def stand(self, speed: int = 40) -> None:
         self.crawler.do_step("stand", speed)
+        self._sync_move_list_standing(True)
         self._goals = self.feet()
 
     def sit(self, speed: int = 40) -> None:
         self.crawler.do_step("sit", speed)
+        self._sync_move_list_standing(False)
         self._goals = self.feet()
+
+    def _gait_keyframes(self, motion_name: str):
+        """Fetch MoveList poses with standing flags set so check_stand is a no-op."""
+        move_list = self.crawler.move_list
+        self._sync_move_list_standing(True)
+        move_list.stand_position = getattr(self.crawler, "stand_position", 0)
+        return move_list[motion_name]
 
     def smooth_action(self, motion_name: str, times: int = 1, step_mm: float = 2.0) -> None:
         """
         Run a named MoveList gait (forward, backward, turn left, ...) with
-        XYZ interpolation between every keyframe. This is what actually walks.
+        XYZ interpolation between every keyframe. Caller should already stand().
         """
-        move_list = getattr(self.crawler, "move_list", None)
-        if move_list is None:
+        if getattr(self.crawler, "move_list", None) is None:
             raise RuntimeError("smooth_action requires a Picrawler with move_list")
 
-        # Ensure standing height / gait helpers see a standing robot
-        if not move_list.is_stand():
-            self.stand(40)
+        toggle = motion_name in (
+            "forward",
+            "backward",
+            "turn left",
+            "turn right",
+            "turn left angle",
+            "turn right angle",
+        )
 
-        for _ in range(times):
-            move_list.stand_position = getattr(self.crawler, "stand_position", 0)
-            # Access via space names the same way Picrawler.do_action does
-            action = move_list[motion_name]
-            if motion_name in (
-                "forward",
-                "backward",
-                "turn left",
-                "turn right",
-                "turn left angle",
-                "turn right angle",
-            ):
+        for i in range(times):
+            action = self._gait_keyframes(motion_name)
+            if toggle:
                 self.crawler.stand_position = self.crawler.stand_position + 1 & 1
+            print(f"  step {i + 1}/{times} ({len(action)} keyframes)")
             for pose in action:
                 self.move_feet_to([[float(v) for v in leg] for leg in pose], step_mm=step_mm)
 

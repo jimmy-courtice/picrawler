@@ -2,13 +2,10 @@
 """
 Smoother gait demo for PiCrawler.
 
-On the robot:
   cd ~/picrawler && git pull
-
-  # Should actually walk (smoothed stock forward):
   sudo python3 -m smooth_gait.demo_crawl --cycles 3
 
-  # Side-by-side: stock snap vs smoothed
+  # Compare stock vs smoothed:
   sudo python3 -m smooth_gait.demo_crawl --mode compare --cycles 2
 """
 
@@ -39,54 +36,60 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--mode",
-        choices=("crawl", "stock", "compare", "sway"),
+        choices=("crawl", "compare", "sway"),
         default="crawl",
-        help="crawl/stock = smoothed forward walk; compare = raw then smooth; sway = body only",
+        help="crawl = smoothed forward; compare = stock then smooth; sway = body only",
     )
     parser.add_argument("--cycles", type=int, default=3, help="Forward steps")
     args = parser.parse_args()
 
     crawler, dry = build_crawler(args.dry_run)
     gait = SmoothGait(crawler, step_mm=2.0, servo_speed=80)
+    did_sit = False
 
     try:
-        print("Standing...")
+        print("1) Stand (once)")
         gait.stand(40)
         time.sleep(1.0)
 
         if args.mode == "sway":
-            print("Body sway only (won't walk)")
+            print("2) Body sway (no walk)")
             gait.demo_body_sway()
 
         elif args.mode == "compare" and not dry:
-            print("--- A: stock do_action('forward') ---")
-            for _ in range(args.cycles):
+            print("2) Stock forward")
+            for i in range(args.cycles):
+                print(f"  stock step {i + 1}/{args.cycles}")
                 crawler.do_action("forward", 1, 60)
-                time.sleep(0.15)
+                time.sleep(0.1)
             time.sleep(0.8)
 
-            print("--- B: smoothed XYZ forward (same gait, less snap) ---")
-            gait.stand(40)
-            time.sleep(0.8)
+            print("3) Smoothed forward")
+            # still standing — do not stand again
+            gait._sync_move_list_standing(True)
             gait.crawl_forward(cycles=args.cycles)
 
         else:
-            # crawl and stock are the same working path now
             if dry:
-                print("Dry-run: stand/sit only (need real Picrawler.move_list to walk)")
+                print("2) Dry-run skip walk")
             else:
-                print(f"Smoothed forward × {args.cycles}")
+                print("2) Smoothed forward (no extra stand)")
                 gait.crawl_forward(cycles=args.cycles)
 
-        print("Done — sitting...")
+        print("3) Sit (once)")
+        gait.sit(40)
+        did_sit = True
+        time.sleep(0.5)
     except KeyboardInterrupt:
-        print("\nInterrupted — sitting...")
+        print("\nInterrupted")
     finally:
-        try:
-            gait.sit(40)
-            time.sleep(0.5)
-        except Exception:
-            pass
+        if not did_sit:
+            try:
+                print("Sit (cleanup)")
+                gait.sit(40)
+                time.sleep(0.4)
+            except Exception:
+                pass
 
     if dry and isinstance(crawler, FakeCrawler):
         print(f"Dry-run frames: {len(crawler.history)}")
