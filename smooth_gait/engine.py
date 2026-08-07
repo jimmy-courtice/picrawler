@@ -85,6 +85,28 @@ def copy_pose(pose: Pose) -> Pose:
 
 
 class SmoothGait:
+    # Foot XYZ in mm (Picrawler local frames). X/Y 45 = "default" reach.
+    X_DEFAULT = 45.0
+    Y_DEFAULT = 45.0
+    Y_START = 0.0
+    Z_DOWN = -50.0
+
+    # All four legs at (45, 45, -50) — symmetric rest
+    SYMMETRIC_REST: Pose = [
+        [X_DEFAULT, Y_DEFAULT, Z_DOWN],  # RF
+        [X_DEFAULT, Y_DEFAULT, Z_DOWN],  # LF
+        [X_DEFAULT, Y_DEFAULT, Z_DOWN],  # LR
+        [X_DEFAULT, Y_DEFAULT, Z_DOWN],  # RR
+    ]
+
+    # Stock stand_position 0 ending pose (diagonal: RF/RR long, LF/LR short)
+    DIAGONAL_STAND: Pose = [
+        [X_DEFAULT, Y_DEFAULT, Z_DOWN],  # RF
+        [X_DEFAULT, Y_START, Z_DOWN],  # LF
+        [X_DEFAULT, Y_START, Z_DOWN],  # LR
+        [X_DEFAULT, Y_DEFAULT, Z_DOWN],  # RR
+    ]
+
     def __init__(
         self,
         crawler,
@@ -137,12 +159,33 @@ class SmoothGait:
             ml.z_current = ml.Z_UP
 
     def stand(self, speed: int = 50) -> None:
+        """Stock diagonal stand (required before stock forward gaits)."""
         self.crawler.do_step("stand", speed)
         self._sync_move_list_standing(True)
+        if hasattr(self.crawler, "stand_position"):
+            self.crawler.stand_position = 0
 
     def sit(self, speed: int = 50) -> None:
         self.crawler.do_step("sit", speed)
         self._sync_move_list_standing(False)
+
+    def rest_symmetric(self, speed: Optional[int] = None) -> None:
+        """All legs to (45, 45, -50) — even resting stance."""
+        self.move_feet_to(copy_pose(self.SYMMETRIC_REST), segments=max(2, self.segments), speed=speed)
+        self._sync_move_list_standing(True)
+
+    def prepare_to_walk(self, speed: Optional[int] = None) -> None:
+        """
+        Move from whatever pose into the stock diagonal stand and reset
+        gait phase so forward keyframes line up.
+        """
+        self.move_feet_to(copy_pose(self.DIAGONAL_STAND), segments=max(2, self.segments), speed=speed)
+        self._sync_move_list_standing(True)
+        if hasattr(self.crawler, "stand_position"):
+            self.crawler.stand_position = 0
+        ml = getattr(self.crawler, "move_list", None)
+        if ml is not None:
+            ml.stand_position = 0
 
     def _gait_keyframes(self, motion_name: str):
         move_list = self.crawler.move_list
@@ -174,10 +217,14 @@ class SmoothGait:
             for pose in action:
                 self.move_feet_to([[float(v) for v in leg] for leg in pose])
 
-    def crawl_forward(self, cycles: int = 1) -> None:
+    def crawl_forward(self, cycles: int = 1, prepare: bool = True) -> None:
+        if prepare:
+            self.prepare_to_walk()
         self.smooth_action("forward", times=cycles)
 
-    def crawl_backward(self, cycles: int = 1) -> None:
+    def crawl_backward(self, cycles: int = 1, prepare: bool = True) -> None:
+        if prepare:
+            self.prepare_to_walk()
         self.smooth_action("backward", times=cycles)
 
     def demo_body_sway(self) -> None:
