@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """
-Smoother gait demo for PiCrawler.
+Smoothed gait demo for PiCrawler.
 
   cd ~/picrawler && git pull
+
+  # Default: 2 XYZ segments between keyframes, servo speed 100 (near stock pace)
   sudo python3 -m smooth_gait.demo_crawl --cycles 3
 
-  # Compare stock vs smoothed:
+  # Even closer to stock speed (only endpoints — good A/B baseline):
+  sudo python3 -m smooth_gait.demo_crawl --segments 1 --cycles 3
+
+  # A bit smoother, still quick:
+  sudo python3 -m smooth_gait.demo_crawl --segments 2 --speed 100 --cycles 3
+
+  # Compare stock vs smooth:
   sudo python3 -m smooth_gait.demo_crawl --mode compare --cycles 2
 """
 
@@ -34,60 +42,55 @@ def build_crawler(dry_run: bool):
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smooth gait demo for PiCrawler")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--mode", choices=("crawl", "compare", "sway"), default="crawl")
+    parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument(
-        "--mode",
-        choices=("crawl", "compare", "sway"),
-        default="crawl",
-        help="crawl = smoothed forward; compare = stock then smooth; sway = body only",
+        "--segments",
+        type=int,
+        default=2,
+        help="XYZ midpoints per keyframe (1=stock-like count, 2=one midpoint). Keep small.",
     )
-    parser.add_argument("--cycles", type=int, default=3, help="Forward steps")
+    parser.add_argument("--speed", type=int, default=100, help="do_step servo speed 1-100")
     args = parser.parse_args()
 
     crawler, dry = build_crawler(args.dry_run)
-    gait = SmoothGait(crawler, step_mm=2.0, servo_speed=80)
+    gait = SmoothGait(crawler, segments=args.segments, servo_speed=args.speed)
     did_sit = False
 
     try:
-        print("1) Stand (once)")
-        gait.stand(40)
-        time.sleep(1.0)
+        print(f"1) Stand  (segments={args.segments}, speed={args.speed})")
+        gait.stand(50)
+        time.sleep(0.6)
 
         if args.mode == "sway":
-            print("2) Body sway (no walk)")
+            print("2) Body sway")
             gait.demo_body_sway()
-
         elif args.mode == "compare" and not dry:
-            print("2) Stock forward")
+            print("2) Stock forward @ speed 60")
             for i in range(args.cycles):
                 print(f"  stock step {i + 1}/{args.cycles}")
                 crawler.do_action("forward", 1, 60)
-                time.sleep(0.1)
-            time.sleep(0.8)
-
+            time.sleep(0.5)
             print("3) Smoothed forward")
-            # still standing — do not stand again
             gait._sync_move_list_standing(True)
             gait.crawl_forward(cycles=args.cycles)
-
         else:
             if dry:
                 print("2) Dry-run skip walk")
             else:
-                print("2) Smoothed forward (no extra stand)")
+                print("2) Smoothed forward")
                 gait.crawl_forward(cycles=args.cycles)
 
-        print("3) Sit (once)")
-        gait.sit(40)
+        print("3) Sit")
+        gait.sit(50)
         did_sit = True
-        time.sleep(0.5)
+        time.sleep(0.3)
     except KeyboardInterrupt:
         print("\nInterrupted")
     finally:
         if not did_sit:
             try:
-                print("Sit (cleanup)")
-                gait.sit(40)
-                time.sleep(0.4)
+                gait.sit(50)
             except Exception:
                 pass
 
