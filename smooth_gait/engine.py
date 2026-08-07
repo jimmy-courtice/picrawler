@@ -1,13 +1,13 @@
 """
-Continuous XYZ gait engine for SunFounder PiCrawler.
+Continuous XYZ gait layer for SunFounder PiCrawler.
 
-Inspired by Freenove FNQR (FNK0030):
-  - interpolate foot targets in Cartesian space, then IK each tick
-  - body translate via per-leg local-frame deltas (PiCrawler is not one shared XYZ)
-  - crawl = body shift + one-leg lift/swing/plant
+Working approach: replay stock MoveList gaits, but interpolate each
+pose→pose transition in foot XYZ (then IK), instead of one big joint-angle
+lerp. That keeps locomotion that already works, and removes a lot of the
+mechanical "snap" between keyframes.
 
-Does not modify picrawler's MoveList. Wrap a Picrawler (or FakeCrawler) and call
-stand / crawl_forward / move_body from your own scripts.
+Experimental: move_body() uses PiCrawler per-leg local-frame signs
+(see MoveList.move_body_absolute).
 """
 
 from __future__ import annotations
@@ -16,8 +16,6 @@ import copy
 import math
 from typing import List, Optional, Sequence, Union
 
-# Leg order matches Picrawler / MoveList:
-#   0 right front, 1 left front, 2 left rear, 3 right rear
 RF, LF, LR, RR = 0, 1, 2, 3
 
 Point = List[float]
@@ -37,7 +35,6 @@ def _lerp(a: Point, b: Point, t: float) -> Point:
 
 
 def _clamp_point(p: Point) -> Point:
-    """Stay inside a conservative PiCrawler workspace (mm)."""
     return [
         max(35.0, min(80.0, p[0])),
         max(-10.0, min(90.0, p[1])),
@@ -46,12 +43,7 @@ def _clamp_point(p: Point) -> Point:
 
 
 def body_foot_deltas(dx: float, dy: float, dz: float) -> Pose:
-    """
-    Foot deltas that produce a body translation (dx, dy, dz).
-
-    PiCrawler stores each leg in its own local frame (see MoveList.move_body_absolute).
-    Front/rear and left/right flip the signs — you cannot add the same vector to all four feet.
-    """
+    """Foot deltas for a body translation; PiCrawler local-frame signs."""
     return [
         [-dx, -dy, -dz],  # RF
         [dx, -dy, -dz],  # LF
@@ -61,10 +53,7 @@ def body_foot_deltas(dx: float, dy: float, dz: float) -> Pose:
 
 
 class FakeCrawler:
-    """In-memory stand-in so you can dry-run gait math off the robot."""
-
     def __init__(self) -> None:
-        # Approximate stock stand (stand_position 0)
         self.current_coord: Pose = [
             [45.0, 45.0, -50.0],
             [45.0, 0.0, -50.0],
@@ -102,35 +91,20 @@ class FakeCrawler:
 
 
 class SmoothGait:
-    """Cartesian gait controller layered on Picrawler."""
-
-    # Conservative defaults — easier to increase than to un-tip the robot
-    X_DEFAULT = 45.0
-    Y_DEFAULT = 45.0
-    Y_START = 0.0
-    Z_DOWN = -50.0
-    Z_UP = -30.0
-
-    BODY_SHIFT = 5.0
-    STRIDE = 18.0
-    LIFT = 15.0
+    """Cartesian interpolation helpers + smoothed stock gaits."""
 
     def __init__(
         self,
         crawler,
         step_mm: float = 2.0,
-        servo_speed: int = 90,
-        epsilon: float = 0.8,
+        servo_speed: int = 80,
+        epsilon: float = 0.75,
     ) -> None:
         self.crawler = crawler
         self.step_mm = step_mm
         self.servo_speed = servo_speed
         self.epsilon = epsilon
         self._goals: Optional[Pose] = None
-        # 0 = next swing pair LF/RR, 1 = RF/LR
-        self.phase = 0
-
-    # ── primitives ──────────────────────────────────────────────────────────
 
     def feet(self) -> Pose:
         return self.crawler.current_step_all_leg_value()
@@ -139,7 +113,6 @@ class SmoothGait:
         self._goals = [_clamp_point(list(map(float, g))) for g in goals]
 
     def tick(self) -> bool:
-        """Advance all feet one step_mm toward goals. Returns True if still moving."""
         if self._goals is None:
             return False
         current = self.feet()
@@ -179,118 +152,56 @@ class SmoothGait:
         self.move_feet_to(goals, step_mm=step_mm)
 
     def move_body(self, dx: float = 0.0, dy: float = 0.0, dz: float = 0.0, step_mm: Optional[float] = None) -> None:
-        """Translate the body using PiCrawler per-leg local frames."""
         self.move_feet_relatively(body_foot_deltas(dx, dy, dz), step_mm=step_mm)
-
-    def swing_leg(
-        self,
-        leg: int,
-        dx: float = 0.0,
-        dy: float = 0.0,
-        lift: Optional[float] = None,
-        step_mm: Optional[float] = None,
-    ) -> None:
-        """Lift one foot, translate in local XY, plant. Stance feet hold still."""
-        lift = self.LIFT if lift is None else lift
-        cur = self.feet()
-        z0 = cur[leg][2]
-
-        up = copy.deepcopy(cur)
-        up[leg][2] = min(z0 + lift, self.Z_UP + 5)
-        self.move_feet_to(up, step_mm=step_mm)
-
-        mid = self.feet()
-        mid[leg][0] += dx
-        mid[leg][1] += dy
-        self.move_feet_to(mid, step_mm=step_mm)
-
-        down = self.feet()
-        down[leg][2] = z0
-        self.move_feet_to(down, step_mm=step_mm)
-
-    # ── high-level ──────────────────────────────────────────────────────────
 
     def stand(self, speed: int = 40) -> None:
         self.crawler.do_step("stand", speed)
-        self.phase = 0
         self._goals = self.feet()
 
     def sit(self, speed: int = 40) -> None:
         self.crawler.do_step("sit", speed)
         self._goals = self.feet()
 
-    def crawl_forward(self, cycles: int = 1) -> None:
-        """Creeping crawl: body shifts; stance feet slide; one leg swings ahead."""
-        order = ([LF, RR], [RF, LR])
-        for _ in range(cycles):
-            for swing in order[self.phase]:
-                self._crawl_one_leg(swing, direction=1.0)
-            self.phase = 1 - self.phase
-
-    def crawl_backward(self, cycles: int = 1) -> None:
-        order = ([LF, RR], [RF, LR])
-        for _ in range(cycles):
-            for swing in order[self.phase]:
-                self._crawl_one_leg(swing, direction=-1.0)
-            self.phase = 1 - self.phase
-
-    def _crawl_one_leg(self, swing: int, direction: float = 1.0) -> None:
-        shift = self.BODY_SHIFT * direction
-        stride = self.STRIDE * direction
-        ground_z = self.Z_DOWN
-        stance_deltas = body_foot_deltas(0.0, shift, 0.0)
-
-        # Body forward/back with correct local-frame signs
-        self.move_body(0.0, shift, 0.0, step_mm=2.0)
-
-        # Lift swing leg
-        cur = self.feet()
-        up = copy.deepcopy(cur)
-        up[swing][2] = min(cur[swing][2] + self.LIFT, self.Z_UP + 5.0)
-        self.move_feet_to(up, step_mm=2.0)
-
-        # Swing leg forward in local +Y (stock gait convention for all legs),
-        # while stance feet take another body-shift delta.
-        mid = self.feet()
-        for i in range(4):
-            if i == swing:
-                mid[i][1] += stride
-            else:
-                mid[i][0] += stance_deltas[i][0]
-                mid[i][1] += stance_deltas[i][1]
-                mid[i][2] += stance_deltas[i][2]
-        self.move_feet_to(mid, step_mm=2.0)
-
-        # Plant
-        down = self.feet()
-        down[swing][2] = ground_z
-        self.move_feet_to(down, step_mm=2.0)
-
-        # Follow-through
-        self.move_body(0.0, shift * 0.5, 0.0, step_mm=2.0)
-
-    def smooth_stock_forward(self, steps: int = 1) -> None:
+    def smooth_action(self, motion_name: str, times: int = 1, step_mm: float = 2.0) -> None:
         """
-        Replay Picrawler's built-in forward keyframes, but lerp each
-        pose-to-pose transition in XYZ. Safest "does it look smoother?" test.
+        Run a named MoveList gait (forward, backward, turn left, ...) with
+        XYZ interpolation between every keyframe. This is what actually walks.
         """
         move_list = getattr(self.crawler, "move_list", None)
         if move_list is None:
-            raise RuntimeError("smooth_stock_forward requires a Picrawler with move_list")
+            raise RuntimeError("smooth_action requires a Picrawler with move_list")
 
-        for _ in range(steps):
+        # Ensure standing height / gait helpers see a standing robot
+        if not move_list.is_stand():
+            self.stand(40)
+
+        for _ in range(times):
             move_list.stand_position = getattr(self.crawler, "stand_position", 0)
-            action = move_list["forward"]
-            if hasattr(self.crawler, "stand_position"):
+            # Access via space names the same way Picrawler.do_action does
+            action = move_list[motion_name]
+            if motion_name in (
+                "forward",
+                "backward",
+                "turn left",
+                "turn right",
+                "turn left angle",
+                "turn right angle",
+            ):
                 self.crawler.stand_position = self.crawler.stand_position + 1 & 1
             for pose in action:
-                self.move_feet_to([[float(v) for v in leg] for leg in pose], step_mm=2.5)
+                self.move_feet_to([[float(v) for v in leg] for leg in pose], step_mm=step_mm)
+
+    def crawl_forward(self, cycles: int = 1) -> None:
+        """Smoothed stock forward gait (reliable locomotion)."""
+        self.smooth_action("forward", times=cycles, step_mm=2.0)
+
+    def crawl_backward(self, cycles: int = 1) -> None:
+        self.smooth_action("backward", times=cycles, step_mm=2.0)
 
     def demo_body_sway(self) -> None:
-        """Small body slides with feet planted (optional; can look like shaking if too big)."""
-        self.move_body(8, 0, 0)
-        self.move_body(-16, 0, 0)
-        self.move_body(8, 0, 0)
-        self.move_body(0, 8, 0)
-        self.move_body(0, -16, 0)
-        self.move_body(0, 8, 0)
+        self.move_body(6, 0, 0)
+        self.move_body(-12, 0, 0)
+        self.move_body(6, 0, 0)
+        self.move_body(0, 6, 0)
+        self.move_body(0, -12, 0)
+        self.move_body(0, 6, 0)

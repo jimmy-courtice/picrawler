@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Demo: smoother motion experiments on PiCrawler.
+Smoother gait demo for PiCrawler.
 
 On the robot:
-  cd ~/picrawler
-  git pull
-  # Safest first — stock forward keyframes, XYZ-smoothed:
-  sudo python3 -m smooth_gait.demo_crawl --mode stock --cycles 2
+  cd ~/picrawler && git pull
 
-  # Freenove-style crawl (after the coordinate fix):
-  sudo python3 -m smooth_gait.demo_crawl --mode crawl --cycles 1
+  # Should actually walk (smoothed stock forward):
+  sudo python3 -m smooth_gait.demo_crawl --cycles 3
 
-Dry-run:
-  python3 -m smooth_gait.demo_crawl --dry-run --mode crawl
+  # Side-by-side: stock snap vs smoothed
+  sudo python3 -m smooth_gait.demo_crawl --mode compare --cycles 2
 """
 
 from __future__ import annotations
@@ -39,47 +36,51 @@ def build_crawler(dry_run: bool):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smooth gait demo for PiCrawler")
-    parser.add_argument("--dry-run", action="store_true", help="No hardware; FakeCrawler")
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--mode",
-        choices=("stock", "crawl", "sway", "compare"),
-        default="stock",
-        help="stock=smooth stock forward (default); crawl=creeping gait; sway=body only; compare=all",
+        choices=("crawl", "stock", "compare", "sway"),
+        default="crawl",
+        help="crawl/stock = smoothed forward walk; compare = raw then smooth; sway = body only",
     )
-    parser.add_argument("--cycles", type=int, default=2, help="Steps / cycles")
+    parser.add_argument("--cycles", type=int, default=3, help="Forward steps")
     args = parser.parse_args()
 
     crawler, dry = build_crawler(args.dry_run)
-    gait = SmoothGait(crawler, step_mm=2.0, servo_speed=90)
+    gait = SmoothGait(crawler, step_mm=2.0, servo_speed=80)
 
     try:
+        print("Standing...")
         gait.stand(40)
-        time.sleep(0.8)
+        time.sleep(1.0)
 
-        if args.mode in ("stock", "compare"):
-            if dry:
-                print("stock mode needs Picrawler.move_list; skipping on dry-run")
-            else:
-                print("--- smooth stock forward ---")
-                gait.smooth_stock_forward(steps=args.cycles)
-                time.sleep(0.4)
-
-        if args.mode in ("crawl", "compare"):
-            print("--- crawl_forward ---")
-            gait.stand(40)
-            time.sleep(0.5)
-            gait.crawl_forward(cycles=args.cycles)
-            time.sleep(0.3)
-            gait.crawl_backward(cycles=max(1, args.cycles // 2))
-
-        if args.mode in ("sway", "compare"):
-            print("--- body sway ---")
-            gait.stand(40)
-            time.sleep(0.5)
+        if args.mode == "sway":
+            print("Body sway only (won't walk)")
             gait.demo_body_sway()
 
+        elif args.mode == "compare" and not dry:
+            print("--- A: stock do_action('forward') ---")
+            for _ in range(args.cycles):
+                crawler.do_action("forward", 1, 60)
+                time.sleep(0.15)
+            time.sleep(0.8)
+
+            print("--- B: smoothed XYZ forward (same gait, less snap) ---")
+            gait.stand(40)
+            time.sleep(0.8)
+            gait.crawl_forward(cycles=args.cycles)
+
+        else:
+            # crawl and stock are the same working path now
+            if dry:
+                print("Dry-run: stand/sit only (need real Picrawler.move_list to walk)")
+            else:
+                print(f"Smoothed forward × {args.cycles}")
+                gait.crawl_forward(cycles=args.cycles)
+
+        print("Done — sitting...")
     except KeyboardInterrupt:
-        print("\nInterrupted.")
+        print("\nInterrupted — sitting...")
     finally:
         try:
             gait.sit(40)
@@ -88,8 +89,7 @@ def main() -> int:
             pass
 
     if dry and isinstance(crawler, FakeCrawler):
-        print(f"Dry-run OK — {len(crawler.history)} pose frames.")
-        print("Last pose:", crawler.current_coord)
+        print(f"Dry-run frames: {len(crawler.history)}")
     return 0
 
 
