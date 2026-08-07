@@ -3,7 +3,7 @@ Continuous XYZ gait engine for SunFounder PiCrawler.
 
 Inspired by Freenove FNQR (FNK0030):
   - interpolate foot targets in Cartesian space, then IK each tick
-  - treat body translate as "move all feet the opposite way"
+  - body translate via per-leg local-frame deltas (PiCrawler is not one shared XYZ)
   - crawl = body shift + one-leg lift/swing/plant
 
 Does not modify picrawler's MoveList. Wrap a Picrawler (or FakeCrawler) and call
@@ -40,8 +40,23 @@ def _clamp_point(p: Point) -> Point:
     """Stay inside a conservative PiCrawler workspace (mm)."""
     return [
         max(35.0, min(80.0, p[0])),
-        max(-15.0, min(95.0, p[1])),
-        max(-80.0, min(-15.0, p[2])),
+        max(-10.0, min(90.0, p[1])),
+        max(-75.0, min(-20.0, p[2])),
+    ]
+
+
+def body_foot_deltas(dx: float, dy: float, dz: float) -> Pose:
+    """
+    Foot deltas that produce a body translation (dx, dy, dz).
+
+    PiCrawler stores each leg in its own local frame (see MoveList.move_body_absolute).
+    Front/rear and left/right flip the signs — you cannot add the same vector to all four feet.
+    """
+    return [
+        [-dx, -dy, -dz],  # RF
+        [dx, -dy, -dz],  # LF
+        [dx, dy, -dz],  # LR
+        [-dx, dy, -dz],  # RR
     ]
 
 
@@ -57,6 +72,8 @@ class FakeCrawler:
             [45.0, 45.0, -50.0],
         ]
         self.history: List[Pose] = []
+        self.stand_position = 0
+        self.move_list = None
 
     def do_step(self, step: Union[str, Sequence[Sequence[float]]], speed: int = 50) -> None:
         if isinstance(step, str):
@@ -87,22 +104,22 @@ class FakeCrawler:
 class SmoothGait:
     """Cartesian gait controller layered on Picrawler."""
 
-    # Tuned for PiCrawler geometry (same ballpark as MoveList defaults)
+    # Conservative defaults — easier to increase than to un-tip the robot
     X_DEFAULT = 45.0
     Y_DEFAULT = 45.0
     Y_START = 0.0
     Z_DOWN = -50.0
     Z_UP = -30.0
 
-    BODY_SHIFT = 8.0  # mm of body translation per crawl phase
-    STRIDE = 28.0  # mm swing-leg travel along Y
-    LIFT = 20.0  # mm foot lift (Z_DOWN -> Z_DOWN+LIFT toward Z_UP)
+    BODY_SHIFT = 5.0
+    STRIDE = 18.0
+    LIFT = 15.0
 
     def __init__(
         self,
         crawler,
-        step_mm: float = 2.5,
-        servo_speed: int = 100,
+        step_mm: float = 2.0,
+        servo_speed: int = 90,
         epsilon: float = 0.8,
     ) -> None:
         self.crawler = crawler
@@ -110,8 +127,7 @@ class SmoothGait:
         self.servo_speed = servo_speed
         self.epsilon = epsilon
         self._goals: Optional[Pose] = None
-        # Gait phase: which diagonal pair is "long" (Freenove Feet12Long / Feet34Long)
-        # 0 = RF/RR long (stock stand_position 0), 1 = LF/LR long
+        # 0 = next swing pair LF/RR, 1 = RF/LR
         self.phase = 0
 
     # ── primitives ──────────────────────────────────────────────────────────
@@ -163,8 +179,8 @@ class SmoothGait:
         self.move_feet_to(goals, step_mm=step_mm)
 
     def move_body(self, dx: float = 0.0, dy: float = 0.0, dz: float = 0.0, step_mm: Optional[float] = None) -> None:
-        """Translate the body in world axes by shifting all feet the opposite way."""
-        self.move_feet_relatively([[-dx, -dy, -dz]] * 4, step_mm=step_mm)
+        """Translate the body using PiCrawler per-leg local frames."""
+        self.move_feet_relatively(body_foot_deltas(dx, dy, dz), step_mm=step_mm)
 
     def swing_leg(
         self,
@@ -174,23 +190,20 @@ class SmoothGait:
         lift: Optional[float] = None,
         step_mm: Optional[float] = None,
     ) -> None:
-        """Lift one foot, translate in XY, plant. Stance feet hold still."""
+        """Lift one foot, translate in local XY, plant. Stance feet hold still."""
         lift = self.LIFT if lift is None else lift
         cur = self.feet()
         z0 = cur[leg][2]
 
-        # lift
         up = copy.deepcopy(cur)
         up[leg][2] = min(z0 + lift, self.Z_UP + 5)
         self.move_feet_to(up, step_mm=step_mm)
 
-        # swing
         mid = self.feet()
         mid[leg][0] += dx
         mid[leg][1] += dy
         self.move_feet_to(mid, step_mm=step_mm)
 
-        # plant
         down = self.feet()
         down[leg][2] = z0
         self.move_feet_to(down, step_mm=step_mm)
@@ -206,28 +219,8 @@ class SmoothGait:
         self.crawler.do_step("sit", speed)
         self._goals = self.feet()
 
-    def crawl_ready(self) -> None:
-        """
-        Symmetric crawl stance: all four feet planted at standing height,
-        with a mild diagonal so the first swing has room.
-        """
-        z = self.Z_DOWN
-        x = self.X_DEFAULT
-        # Mild diagonal: RF/RR a bit forward in Y, LF/LR a bit back
-        pose: Pose = [
-            [x, self.Y_DEFAULT + 10, z],  # RF
-            [x, self.Y_START + 10, z],  # LF
-            [x, self.Y_START + 10, z],  # LR
-            [x, self.Y_DEFAULT + 10, z],  # RR
-        ]
-        self.move_feet_to(pose, step_mm=3.0)
-        self.phase = 0
-
     def crawl_forward(self, cycles: int = 1) -> None:
-        """
-        Freenove-style creeping crawl:
-          body shifts forward; stance feet slide back while one leg swings ahead.
-        """
+        """Creeping crawl: body shifts; stance feet slide; one leg swings ahead."""
         order = ([LF, RR], [RF, LR])
         for _ in range(cycles):
             for swing in order[self.phase]:
@@ -242,43 +235,45 @@ class SmoothGait:
             self.phase = 1 - self.phase
 
     def _crawl_one_leg(self, swing: int, direction: float = 1.0) -> None:
-        """One Freenove-like step: body shift, lift, stance-slide + swing, plant."""
         shift = self.BODY_SHIFT * direction
         stride = self.STRIDE * direction
         ground_z = self.Z_DOWN
+        stance_deltas = body_foot_deltas(0.0, shift, 0.0)
 
-        # Body forward/back (feet move opposite)
+        # Body forward/back with correct local-frame signs
         self.move_body(0.0, shift, 0.0, step_mm=2.0)
 
         # Lift swing leg
         cur = self.feet()
         up = copy.deepcopy(cur)
         up[swing][2] = min(cur[swing][2] + self.LIFT, self.Z_UP + 5.0)
-        self.move_feet_to(up, step_mm=2.5)
+        self.move_feet_to(up, step_mm=2.0)
 
-        # Swing forward while stance feet slide opposite (body keeps advancing)
+        # Swing leg forward in local +Y (stock gait convention for all legs),
+        # while stance feet take another body-shift delta.
         mid = self.feet()
         for i in range(4):
             if i == swing:
                 mid[i][1] += stride
             else:
-                mid[i][1] -= shift
-        self.move_feet_to(mid, step_mm=2.5)
+                mid[i][0] += stance_deltas[i][0]
+                mid[i][1] += stance_deltas[i][1]
+                mid[i][2] += stance_deltas[i][2]
+        self.move_feet_to(mid, step_mm=2.0)
 
         # Plant
         down = self.feet()
         down[swing][2] = ground_z
-        self.move_feet_to(down, step_mm=2.5)
+        self.move_feet_to(down, step_mm=2.0)
 
-        # Small follow-through body shift
+        # Follow-through
         self.move_body(0.0, shift * 0.5, 0.0, step_mm=2.0)
 
     def smooth_stock_forward(self, steps: int = 1) -> None:
         """
         Replay Picrawler's built-in forward keyframes, but lerp each
-        pose-to-pose transition in XYZ (quick win without a new gait).
+        pose-to-pose transition in XYZ. Safest "does it look smoother?" test.
         """
-        # Lazy import only when used with a real/fake crawler that has move_list
         move_list = getattr(self.crawler, "move_list", None)
         if move_list is None:
             raise RuntimeError("smooth_stock_forward requires a Picrawler with move_list")
@@ -289,15 +284,13 @@ class SmoothGait:
             if hasattr(self.crawler, "stand_position"):
                 self.crawler.stand_position = self.crawler.stand_position + 1 & 1
             for pose in action:
-                self.move_feet_to([[float(v) for v in leg] for leg in pose], step_mm=3.0)
+                self.move_feet_to([[float(v) for v in leg] for leg in pose], step_mm=2.5)
 
     def demo_body_sway(self) -> None:
-        """Slide/rock the body while feet stay planted — Freenove TwistBody vibe."""
-        self.move_body(12, 0, 0)
-        self.move_body(-24, 0, 0)
-        self.move_body(12, 0, 0)
-        self.move_body(0, 12, 0)
-        self.move_body(0, -24, 0)
-        self.move_body(0, 12, 0)
-        self.move_body(0, 0, 8)
-        self.move_body(0, 0, -8)
+        """Small body slides with feet planted (optional; can look like shaking if too big)."""
+        self.move_body(8, 0, 0)
+        self.move_body(-16, 0, 0)
+        self.move_body(8, 0, 0)
+        self.move_body(0, 8, 0)
+        self.move_body(0, -16, 0)
+        self.move_body(0, 8, 0)

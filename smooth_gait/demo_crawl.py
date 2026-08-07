@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Demo: Freenove-style smooth crawl on PiCrawler.
+Demo: smoother motion experiments on PiCrawler.
 
-On the robot (after picrawler + robot_hat are installed):
+On the robot:
   cd ~/picrawler
-  sudo python3 -m smooth_gait.demo_crawl
+  git pull
+  # Safest first — stock forward keyframes, XYZ-smoothed:
+  sudo python3 -m smooth_gait.demo_crawl --mode stock --cycles 2
 
-Dry-run on any machine (no hardware):
-  python3 -m smooth_gait.demo_crawl --dry-run
+  # Freenove-style crawl (after the coordinate fix):
+  sudo python3 -m smooth_gait.demo_crawl --mode crawl --cycles 1
 
-Compare with stock gait:
-  sudo python3 -m smooth_gait.demo_crawl --compare
+Dry-run:
+  python3 -m smooth_gait.demo_crawl --dry-run --mode crawl
 """
 
 from __future__ import annotations
@@ -20,7 +22,6 @@ import sys
 import time
 from pathlib import Path
 
-# Allow `python3 smooth_gait/demo_crawl.py` from repo root
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -36,59 +37,47 @@ def build_crawler(dry_run: bool):
     return Picrawler(), False
 
 
-def run_smooth(gait: SmoothGait, cycles: int) -> None:
-    print("stand → crawl_ready → body sway → crawl_forward ×", cycles)
-    gait.stand(40)
-    time.sleep(0.5)
-    gait.crawl_ready()
-    time.sleep(0.3)
-    gait.demo_body_sway()
-    time.sleep(0.3)
-    gait.crawl_forward(cycles=cycles)
-    time.sleep(0.3)
-    gait.crawl_backward(cycles=max(1, cycles // 2))
-
-
-def run_compare(gait: SmoothGait, crawler, cycles: int) -> None:
-    print("--- stock do_action('forward') ---")
-    crawler.do_step("stand", 40)
-    time.sleep(0.5)
-    for _ in range(cycles):
-        crawler.do_action("forward", 1, 60)
-        time.sleep(0.2)
-
-    print("--- smooth XYZ replay of stock forward keyframes ---")
-    gait.stand(40)
-    time.sleep(0.5)
-    gait.smooth_stock_forward(steps=cycles)
-
-    print("--- Freenove-style crawl_forward ---")
-    gait.crawl_ready()
-    gait.crawl_forward(cycles=cycles)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Smooth gait demo for PiCrawler")
     parser.add_argument("--dry-run", action="store_true", help="No hardware; FakeCrawler")
-    parser.add_argument("--compare", action="store_true", help="Stock vs smooth vs crawl")
-    parser.add_argument("--cycles", type=int, default=2, help="Crawl / forward cycles")
+    parser.add_argument(
+        "--mode",
+        choices=("stock", "crawl", "sway", "compare"),
+        default="stock",
+        help="stock=smooth stock forward (default); crawl=creeping gait; sway=body only; compare=all",
+    )
+    parser.add_argument("--cycles", type=int, default=2, help="Steps / cycles")
     args = parser.parse_args()
 
     crawler, dry = build_crawler(args.dry_run)
-    gait = SmoothGait(crawler, step_mm=2.5, servo_speed=100)
+    gait = SmoothGait(crawler, step_mm=2.0, servo_speed=90)
 
     try:
-        if args.compare:
+        gait.stand(40)
+        time.sleep(0.8)
+
+        if args.mode in ("stock", "compare"):
             if dry:
-                print("Note: --compare with --dry-run skips stock do_action (needs move_list).")
-                print("Running Freenove-style crawl only.")
-                gait.stand()
-                gait.crawl_ready()
-                gait.crawl_forward(cycles=args.cycles)
+                print("stock mode needs Picrawler.move_list; skipping on dry-run")
             else:
-                run_compare(gait, crawler, args.cycles)
-        else:
-            run_smooth(gait, args.cycles)
+                print("--- smooth stock forward ---")
+                gait.smooth_stock_forward(steps=args.cycles)
+                time.sleep(0.4)
+
+        if args.mode in ("crawl", "compare"):
+            print("--- crawl_forward ---")
+            gait.stand(40)
+            time.sleep(0.5)
+            gait.crawl_forward(cycles=args.cycles)
+            time.sleep(0.3)
+            gait.crawl_backward(cycles=max(1, args.cycles // 2))
+
+        if args.mode in ("sway", "compare"):
+            print("--- body sway ---")
+            gait.stand(40)
+            time.sleep(0.5)
+            gait.demo_body_sway()
+
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
@@ -99,7 +88,7 @@ def main() -> int:
             pass
 
     if dry and isinstance(crawler, FakeCrawler):
-        print(f"Dry-run OK — {len(crawler.history)} pose frames generated.")
+        print(f"Dry-run OK — {len(crawler.history)} pose frames.")
         print("Last pose:", crawler.current_coord)
     return 0
 
