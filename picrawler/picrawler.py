@@ -33,16 +33,16 @@ class Picrawler(Robot):
         init_angles=None,
         smooth_segments=2,
         yaw_trim=0,
-        yaw_trim_interval=4,
+        yaw_trim_interval=None,
     ):
         """
         :param smooth_segments: XYZ midpoints between keyframes when do_step
             plays a pose list. 1 = original snap, 2 = one midpoint (default).
-        :param yaw_trim: degrees of yaw nudge on forward/backward (soft).
-            Positive = counteract right-drift (nudge left). Negative = nudge
-            right. 0 = off. Try 3–6; stock turn_left_angle is 30° and far
-            too strong for mild pull.
-        :param yaw_trim_interval: apply that micro-turn every N travel steps.
+        :param yaw_trim: mm of left/right stride bias on forward/backward.
+            Positive = longer right-side reach (steer left; use if it pulls
+            right). Negative = steer right. 0 = off. Try 2–5. Applied every
+            step — no separate turn/wiggle.
+        :param yaw_trim_interval: ignored (kept for old call sites).
         """
         utils.reset_mcu()
         time.sleep(0.2)
@@ -63,7 +63,7 @@ class Picrawler(Robot):
         self.smooth_segments = max(1, int(smooth_segments))
         self._segments_override = None
         self.yaw_trim = float(yaw_trim)
-        self.yaw_trim_interval = max(1, int(yaw_trim_interval))
+        self.yaw_trim_interval = yaw_trim_interval  # unused
         self.stand_position = 0
         self.direction = [
             1,1,-1,
@@ -204,43 +204,27 @@ class Picrawler(Robot):
         self.stand_position = 0
         ml.stand_position = 0
 
-    def _play_motion_once(self, motion_name, speed=50):
-        """Play one MoveList cycle without stand/sit bookends (for yaw trim)."""
-        ml = self.move_list
-        spaced = motion_name.replace("_", " ")
-        ml.stand_position = self.stand_position
-        if spaced in self._GAIT_MOTIONS:
-            self.stand_position = self.stand_position + 1 & 1
-        self._mark_standing()
-        action = ml[spaced]
-        override = 1 if len(action) >= self._DENSE_KEYFRAME_THRESHOLD else None
-        prev = self._segments_override
-        self._segments_override = override
-        try:
-            for pose in action:
-                self.do_step(pose, speed=speed)
-        finally:
-            self._segments_override = prev
+    def _bias_gait_pose(self, pose, travel_motion):
+        """Asymmetric Y reach so forward/backward steers without a turn wiggle.
 
-    def _apply_yaw_trim(self, travel_motion, speed=50):
-        """Counteract left/right drift with a small-degree turn_angle nudge."""
-        if self.yaw_trim == 0:
-            return
-        # +trim ⇒ forward was pulling right ⇒ nudge left; backward gets the opposite
-        if travel_motion == "forward":
-            trim_name = "turn left angle" if self.yaw_trim > 0 else "turn right angle"
-        elif travel_motion == "backward":
-            trim_name = "turn right angle" if self.yaw_trim > 0 else "turn left angle"
-        else:
-            return
+        Leg order: RF, LF, LR, RR. Positive yaw_trim lengthens right-side Y
+        and shortens left-side Y (steer left). Backward inverts the bias.
+        """
+        b = self.yaw_trim
+        if not b:
+            return pose
+        if travel_motion == "backward":
+            b = -b
         ml = self.move_list
-        old_angle = ml.angle
-        try:
-            # Stock turn_*_angle uses 30° — far too strong for drift fix
-            ml.angle = max(1.0, abs(self.yaw_trim))
-            self._play_motion_once(trim_name, speed=speed)
-        finally:
-            ml.angle = old_angle
+        # Only tweak legs that are reaching or lifted (not planted stance)
+        y_reach = ml.Y_DEFAULT * 1.5
+        out = []
+        for i, (x, y, z) in enumerate(pose):
+            if y >= y_reach or z > ml.Z_DEFAULT + 5:
+                side = 1.0 if i in (0, 3) else -1.0
+                y = y + side * b
+            out.append([x, y, z])
+        return out
 
     def do_action(self, motion_name, step=1, speed=50):
         spaced = motion_name.replace("_", " ")
@@ -260,7 +244,7 @@ class Picrawler(Robot):
                 self._mark_standing()
                 self.do_step(ml._diagonal_pose(ml.Z_DEFAULT), speed=speed)
 
-            for i in range(step):
+            for _ in range(step):
                 ml.stand_position = self.stand_position
                 if is_gait:
                     self.stand_position = self.stand_position + 1 & 1
@@ -274,13 +258,11 @@ class Picrawler(Robot):
                 self._segments_override = override
                 try:
                     for pose in action:
+                        if spaced in ("forward", "backward") and self.yaw_trim:
+                            pose = self._bias_gait_pose(pose, spaced)
                         self.do_step(pose, speed=speed)
                 finally:
                     self._segments_override = prev
-
-                if spaced in ("forward", "backward") and self.yaw_trim != 0:
-                    if (i + 1) % self.yaw_trim_interval == 0:
-                        self._apply_yaw_trim(spaced, speed=speed)
 
             # All non-pose motions finish in square rest
             self._return_to_rest(speed=speed)
