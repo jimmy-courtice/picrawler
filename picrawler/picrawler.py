@@ -214,8 +214,8 @@ class Picrawler(Robot):
             return pose
         if travel_motion == "backward":
             b = -b
-        # Gain: user trim ~4–5 should cover a moderate right-pull
-        b *= 2.8
+        # Gain: sweet spot between “still drifts right” and “hard left”
+        b *= 2.0
         out = []
         for i, (x, y, z) in enumerate(pose):
             side = 1.0 if i in (0, 3) else -1.0
