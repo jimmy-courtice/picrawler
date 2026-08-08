@@ -9,17 +9,23 @@ class Picrawler(Robot):
     Customize motion by editing MoveList in this file — those definitions
     *are* the defaults (stand, sit, forward, …). There is no parallel gait layer.
 
-    smooth_segments only changes playback (XYZ midpoints between keyframes).
+    smooth_segments controls XYZ midpoints between keyframes in do_step.
+    Dense motions (e.g. dance) automatically skip midpoints.
     """
     A = 48
     B = 78
     C = 33
     OFFSET_FILE = os.path.expanduser('~/.config/.picrawler.config')
     PIN_LIST = [9, 10, 11, 3, 4, 5, 0, 1, 2, 6, 7, 8]
-    _GAIT_MOTIONS = (
+    _GAIT_MOTIONS = frozenset({
         "forward", "backward", "turn left", "turn right",
         "turn left angle", "turn right angle",
-    )
+    })
+    _POSE_MOTIONS = frozenset({"sit", "stand"})
+    # Above this keyframe count, do_action forces segments=1 (dance, etc.)
+    _DENSE_KEYFRAME_THRESHOLD = 40
+    # Skip XYZ midpoints when max foot travel is below this (mm)
+    _TINY_POSE_DELTA_MM = 3.0
 
     def __init__(self, pin_list=PIN_LIST, init_angles=None, smooth_segments=2):
         """
@@ -43,6 +49,7 @@ class Picrawler(Robot):
         }
 
         self.smooth_segments = max(1, int(smooth_segments))
+        self._segments_override = None
         self.stand_position = 0
         self.direction = [
             1,1,-1,
@@ -140,10 +147,27 @@ class Picrawler(Robot):
         # print('output: %s'%[alpha,beta,gamma])
         return limit_flag,[alpha,beta,gamma]
 
+    @staticmethod
+    def _smoothstep(t):
+        """Ease in/out for segment interpolation (0..1 → 0..1)."""
+        return t * t * (3.0 - 2.0 * t)
+
     def _lerp_point(self, a, b, t):
         return [a[0] + (b[0] - a[0]) * t,
                 a[1] + (b[1] - a[1]) * t,
                 a[2] + (b[2] - a[2]) * t]
+
+    def _pose_max_delta(self, a, b):
+        """Largest foot travel (mm) between two 4-leg poses."""
+        best = 0.0
+        for i in range(4):
+            dx = a[i][0] - b[i][0]
+            dy = a[i][1] - b[i][1]
+            dz = a[i][2] - b[i][2]
+            d = math.sqrt(dx * dx + dy * dy + dz * dz)
+            if d > best:
+                best = d
+        return best
 
     def _do_step_raw(self, coords, speed=50, israise=False):
         """Single pose → IK → servos (no segment interpolation)."""
@@ -154,34 +178,71 @@ class Picrawler(Robot):
         self.coord_temp = list.copy(coords)
         self.set_angle(angles_temp, speed, israise)
 
+    def _mark_standing(self):
+        self.move_list.z_current = self.move_list.Z_DEFAULT
+        self.move_list.ready_state = 1
+
+    def _return_to_rest(self, speed=50):
+        """Square rest (all legs Y=45) after a motion."""
+        ml = self.move_list
+        self._mark_standing()
+        self.do_step(ml._square_pose(ml.Z_DEFAULT), speed=speed)
+        self.stand_position = 0
+        ml.stand_position = 0
+
     def do_action(self, motion_name, step=1, speed=50):
+        spaced = motion_name.replace("_", " ")
+        under = motion_name.replace(" ", "_")
+
+        # sit / stand — same path as do_step('sit'/'stand')
+        if under in self._POSE_MOTIONS or spaced in self._POSE_MOTIONS:
+            pose_name = "sit" if under == "sit" or spaced == "sit" else "stand"
+            self.do_step(pose_name, speed=speed)
+            return
+
+        is_gait = spaced in self._GAIT_MOTIONS
+        ml = self.move_list
+
         try:
-            ml = self.move_list
-            is_gait = motion_name in self._GAIT_MOTIONS
             if is_gait:
-                # Walk keyframes expect diagonal footprint; rest is square (all Y=45)
-                ml.z_current = ml.Z_DEFAULT
-                ml.ready_state = 1
+                self._mark_standing()
                 self.do_step(ml._diagonal_pose(ml.Z_DEFAULT), speed=speed)
+
             for _ in range(step):
                 ml.stand_position = self.stand_position
                 if is_gait:
                     self.stand_position = self.stand_position + 1 & 1
-                ml.z_current = ml.Z_DEFAULT
-                ml.ready_state = 1
-                action = ml[motion_name]
-                for _step in action:
-                    self.do_step(_step, speed=speed)
-            if is_gait:
-                self.do_step(ml._square_pose(ml.Z_DEFAULT), speed=speed)
-                self.stand_position = 0
-                ml.stand_position = 0
+                self._mark_standing()
+                # MoveList.__getitem__ maps spaces → underscores
+                action = ml[spaced if spaced in self._GAIT_MOTIONS else motion_name]
+                override = None
+                if len(action) >= self._DENSE_KEYFRAME_THRESHOLD:
+                    override = 1
+                prev = self._segments_override
+                self._segments_override = override
+                try:
+                    for pose in action:
+                        self.do_step(pose, speed=speed)
+                finally:
+                    self._segments_override = prev
+
+            # All non-pose motions finish in square rest
+            self._return_to_rest(speed=speed)
         except AttributeError:
             try:
                 for _ in range(step):
                     action_add = self.move_list_add[motion_name]
-                    for _step in action_add:
-                        self.do_step(_step, speed=speed)
+                    if action_add is None:
+                        raise KeyError(motion_name)
+                    override = 1 if len(action_add) >= self._DENSE_KEYFRAME_THRESHOLD else None
+                    prev = self._segments_override
+                    self._segments_override = override
+                    try:
+                        for pose in action_add:
+                            self.do_step(pose, speed=speed)
+                    finally:
+                        self._segments_override = prev
+                self._return_to_rest(speed=speed)
             except KeyError:
                 print("No such action")
 
@@ -214,14 +275,13 @@ class Picrawler(Robot):
 
     def do_step(self, _step, speed=50, israise=False):
         if isinstance(_step, str):
-            if _step in ("stand", "sit"):
-                # Fresh evaluate so stand/sit always match current MoveList definition
-                frames = self.move_list[_step]
+            name = _step.replace(" ", "_")
+            if name in ("stand", "sit"):
+                frames = self.move_list[name]
                 for one_step in frames:
                     self.do_step(one_step, speed=speed, israise=israise)
-                if _step == "stand":
-                    self.move_list.z_current = self.move_list.Z_DEFAULT
-                    self.move_list.ready_state = 1
+                if name == "stand":
+                    self._mark_standing()
                     self.stand_position = 0
                     self.move_list.stand_position = 0
                 else:
@@ -230,13 +290,15 @@ class Picrawler(Robot):
                 print("The name of gait is not in the default gait dictionary")
         elif isinstance(_step, list):
             segs = self.smooth_segments
-            if segs <= 1:
-                self._do_step_raw(_step, speed=speed, israise=israise)
-                return
+            if self._segments_override is not None:
+                segs = self._segments_override
             start = self.current_step_all_leg_value()
             end = [list(map(float, leg)) for leg in _step]
+            if segs <= 1 or self._pose_max_delta(start, end) < self._TINY_POSE_DELTA_MM:
+                self._do_step_raw(end, speed=speed, israise=israise)
+                return
             for i in range(1, segs + 1):
-                t = i / float(segs)
+                t = self._smoothstep(i / float(segs))
                 mid = [self._lerp_point(start[j], end[j], t) for j in range(4)]
                 self._do_step_raw(mid, speed=speed, israise=israise)
         else:

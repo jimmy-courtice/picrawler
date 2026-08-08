@@ -12,8 +12,8 @@ class VoiceActiveCrawler(VoiceAssistant):
         "backward":     ("do_action", {"motion_name": "backward", "step": 1, "speed": 80}),
         "turn left":    ("do_action", {"motion_name": "turn left", "step": 1, "speed": 80}),
         "turn right":   ("do_action", {"motion_name": "turn right", "step": 1, "speed": 80}),
-        "sit":          ("do_action", {"motion_name": "sit", "step": 1, "speed": 50}),
-        "stand":        ("do_action", {"motion_name": "stand", "step": 1, "speed": 50}),
+        "sit":          ("do_step", {"_step": "sit", "speed": 50}),
+        "stand":        ("do_step", {"_step": "stand", "speed": 50}),
         "wave":         ("do_action", {"motion_name": "wave", "step": 1, "speed": 60}),
         "push up":      ("do_action", {"motion_name": "push_up", "step": 1, "speed": 50}),
         "dance":        ("do_action", {"motion_name": "dance", "step": 1, "speed": 80}),
@@ -67,10 +67,10 @@ class VoiceActiveCrawler(VoiceAssistant):
             target=self._action_handler, daemon=True
         )
         self._action_thread.start()
-        self.crawler.do_action("sit", speed=50)
+        self.crawler.do_step("sit", speed=50)
 
     def before_listen(self):
-        self.crawler.do_action("sit", speed=50)
+        self.crawler.do_step("sit", speed=50)
 
     def on_wake(self):
         pass
@@ -104,15 +104,15 @@ class VoiceActiveCrawler(VoiceAssistant):
 
     def after_say(self, text):
         self._wait_actions_done()
-        self.crawler.do_action("sit", speed=50)
+        self.crawler.do_step("sit", speed=50)
 
     def on_finish_a_round(self):
         self._wait_actions_done()
-        self.crawler.do_action("sit", speed=50)
+        self.crawler.do_step("sit", speed=50)
 
     def on_stop(self):
         self._action_running = False
-        self.crawler.do_action("sit", speed=50)
+        self.crawler.do_step("sit", speed=50)
 
     # ── action dispatch ──────────────────────────────────────────────
 
@@ -121,7 +121,7 @@ class VoiceActiveCrawler(VoiceAssistant):
             try:
                 action = self.action_queue.get(timeout=0.5)
                 if action == 'stop':
-                    self.crawler.do_action("sit", speed=50)
+                    self.crawler.do_step("sit", speed=50)
                 elif action in self.ACTION_MAP:
                     method_name, kwargs = self.ACTION_MAP[action]
                     getattr(self.crawler, method_name)(**kwargs)
