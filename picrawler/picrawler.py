@@ -38,10 +38,9 @@ class Picrawler(Robot):
         """
         :param smooth_segments: XYZ midpoints between keyframes when do_step
             plays a pose list. 1 = original snap, 2 = one midpoint (default).
-        :param yaw_trim: mm of left/right stride bias on forward/backward.
-            Positive = longer right-side reach (steer left; use if it pulls
-            right). Negative = steer right. 0 = off. Try 2–5. Applied every
-            step — no separate turn/wiggle.
+        :param yaw_trim: left/right steer strength on forward/backward.
+            Positive = steer left (if it pulls right). Negative = steer right.
+            0 = off. Typical useful range 2–5 after the stronger bias path.
         :param yaw_trim_interval: ignored (kept for old call sites).
         """
         utils.reset_mcu()
@@ -205,24 +204,28 @@ class Picrawler(Robot):
         ml.stand_position = 0
 
     def _bias_gait_pose(self, pose, travel_motion):
-        """Asymmetric Y reach so forward/backward steers without a turn wiggle.
+        """Asymmetric stride so forward/backward steers without a turn wiggle.
 
-        Leg order: RF, LF, LR, RR. Positive yaw_trim lengthens right-side Y
-        and shortens left-side Y (steer left). Backward inverts the bias.
+        Leg order: RF, LF, LR, RR. Positive yaw_trim lengthens/outboards the
+        right side and shortens/inboards the left (steer left). Backward
+        inverts. Stronger than a pure tip-reach nudge: biases all forward Y
+        and a little X on swinging/reaching legs.
         """
         b = self.yaw_trim
         if not b:
             return pose
         if travel_motion == "backward":
             b = -b
+        # ~1.6× so trim≈3–4 matches what used to need ~7 on tip-only bias
+        b *= 1.6
         ml = self.move_list
-        # Only tweak legs that are reaching or lifted (not planted stance)
-        y_reach = ml.Y_DEFAULT * 1.5
         out = []
         for i, (x, y, z) in enumerate(pose):
-            if y >= y_reach or z > ml.Z_DEFAULT + 5:
-                side = 1.0 if i in (0, 3) else -1.0
+            side = 1.0 if i in (0, 3) else -1.0
+            if y > 0:
                 y = y + side * b
+            if z > ml.Z_DEFAULT + 5 or y >= ml.Y_DEFAULT:
+                x = x + side * (b * 0.4)
             out.append([x, y, z])
         return out
 
