@@ -30,7 +30,7 @@ def main() -> int:
 
     crawler = Picrawler(smooth_segments=args.segments)
     try:
-        print("stand (diagonal — defined in MoveList.stand)")
+        print("stand (all legs Y=45 — MoveList.stand)")
         crawler.do_step("stand", 50)
         time.sleep(0.8)
 

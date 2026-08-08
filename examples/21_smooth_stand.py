@@ -15,16 +15,12 @@ crawler = Picrawler(smooth_segments=2)  # 1 = stock snap between poses
 
 def main():
     try:
-        print("stand (diagonal default)")
+        print("stand (all legs at 45,45,-50)")
         crawler.do_step("stand", 50)
         sleep(1.0)
 
-        print("forward × 3")
+        print("forward × 3 (returns to all-45 rest)")
         crawler.do_action("forward", 3, 100)
-        sleep(0.3)
-
-        print("stand again")
-        crawler.do_step("stand", 50)
         sleep(0.5)
     except KeyboardInterrupt:
         print("\nInterrupted")

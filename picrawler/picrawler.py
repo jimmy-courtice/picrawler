@@ -156,16 +156,26 @@ class Picrawler(Robot):
 
     def do_action(self, motion_name, step=1, speed=50):
         try:
+            ml = self.move_list
+            is_gait = motion_name in self._GAIT_MOTIONS
+            if is_gait:
+                # Walk keyframes expect diagonal footprint; rest is square (all Y=45)
+                ml.z_current = ml.Z_DEFAULT
+                ml.ready_state = 1
+                self.do_step(ml._diagonal_pose(ml.Z_DEFAULT), speed=speed)
             for _ in range(step):
-                self.move_list.stand_position = self.stand_position
-                if motion_name in self._GAIT_MOTIONS:
+                ml.stand_position = self.stand_position
+                if is_gait:
                     self.stand_position = self.stand_position + 1 & 1
-                # Keep standing flag so @check_stand does not re-inject stand frames
-                self.move_list.z_current = self.move_list.Z_DEFAULT
-                self.move_list.ready_state = 1
-                action = self.move_list[motion_name]
+                ml.z_current = ml.Z_DEFAULT
+                ml.ready_state = 1
+                action = ml[motion_name]
                 for _step in action:
                     self.do_step(_step, speed=speed)
+            if is_gait:
+                self.do_step(ml._square_pose(ml.Z_DEFAULT), speed=speed)
+                self.stand_position = 0
+                ml.stand_position = 0
         except AttributeError:
             try:
                 for _ in range(step):
@@ -297,9 +307,10 @@ class Picrawler(Robot):
         Leg order each frame: [right front, left front, left rear, right rear]
         Each leg is [x, y, z] in mm (local frame).
 
-        stand  — default rest / start / end pose (diagonal: RF/RR Y=45, LF/LR Y=0)
-        sit    — parked pose
-        forward / backward / turn_* — walk cycles; assume you are already in stand
+        stand  — default rest: ALL legs at (45, 45, Z_DEFAULT)
+        sit    — park: all legs at (45, 45, Z_UP)
+        forward / backward / turn_* — walk cycles (do_action eases through
+            diagonal gait stance, then returns to square rest)
         """
         LENGTH_SIDE = 77
         X_DEFAULT = 45
@@ -389,8 +400,13 @@ class Picrawler(Robot):
                 return wrapper2
             return wrapper1
         
+        def _square_pose(self, z):
+            """Rest stance: all four legs at (X=45, Y=45, z)."""
+            x, y = self.X_DEFAULT, self.Y_DEFAULT
+            return [[x, y, z], [x, y, z], [x, y, z], [x, y, z]]
+
         def _diagonal_pose(self, z):
-            """Default stance: RF/RR long (Y=45), LF/LR short (Y=0)."""
+            """Gait footprint: RF/RR long (Y=45), LF/LR short (Y=0)."""
             return [
                 [self.X_DEFAULT, self.Y_DEFAULT, z],
                 [self.X_DEFAULT, self.Y_START, z],
@@ -401,31 +417,31 @@ class Picrawler(Robot):
         @property
         @normal_action(0)
         def sit(self):
-            """Park in the same diagonal footprint, feet raised (Z_UP)."""
+            """Park: all legs at Y=45, raised (Z_UP)."""
             self.z_current = self.Z_UP
-            return [self._diagonal_pose(self.z_current)]
+            return [self._square_pose(self.z_current)]
 
         @property
         @normal_action(0)
         def stand(self):
-            """Default rest: diagonal stance at standing height."""
+            """Default rest: all legs at (45, 45, Z_DEFAULT)."""
             _stand = []
             if self.ready_state == 0:
                 _stand += self.ready
             self.z_current = self.Z_DEFAULT
             z = self.z_current
             _stand += [
-                self._diagonal_pose(z * 0.35),
-                self._diagonal_pose(z * 0.55),
-                self._diagonal_pose(z * 0.75),
-                self._diagonal_pose(z * 0.9),
-                self._diagonal_pose(z),
+                self._square_pose(z * 0.35),
+                self._square_pose(z * 0.55),
+                self._square_pose(z * 0.75),
+                self._square_pose(z * 0.9),
+                self._square_pose(z),
             ]
             return _stand
         
         @property
         def ready(self):
-            _ready = [self._diagonal_pose(self.z_current)]
+            _ready = [self._square_pose(self.z_current)]
             self.ready_state = 1
             return _ready
           
