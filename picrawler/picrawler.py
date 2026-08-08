@@ -206,26 +206,21 @@ class Picrawler(Robot):
     def _bias_gait_pose(self, pose, travel_motion):
         """Asymmetric stride so forward/backward steers without a turn wiggle.
 
-        Leg order: RF, LF, LR, RR. Positive yaw_trim lengthens/outboards the
-        right side and shortens/inboards the left (steer left). Backward
-        inverts. Stronger than a pure tip-reach nudge: biases all forward Y
-        and a little X on swinging/reaching legs.
+        Leg order: RF, LF, LR, RR. Positive yaw_trim lengthens right-side Y
+        and shortens left-side Y (steer left). Backward inverts.
         """
         b = self.yaw_trim
         if not b:
             return pose
         if travel_motion == "backward":
             b = -b
-        # ~1.6× so trim≈3–4 matches what used to need ~7 on tip-only bias
-        b *= 1.6
-        ml = self.move_list
+        # Gain: user trim ~4–5 should cover a moderate right-pull
+        b *= 2.8
         out = []
         for i, (x, y, z) in enumerate(pose):
             side = 1.0 if i in (0, 3) else -1.0
             if y > 0:
                 y = y + side * b
-            if z > ml.Z_DEFAULT + 5 or y >= ml.Y_DEFAULT:
-                x = x + side * (b * 0.4)
             out.append([x, y, z])
         return out
 

@@ -16,7 +16,7 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
 ]
 keywords = ["picrawler", "sunfounder", "raspberry pi"]
-version = "2.2.5"
+version = "2.2.6"
 
 dependencies = ["readchar"]
 
