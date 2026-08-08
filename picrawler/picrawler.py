@@ -33,16 +33,16 @@ class Picrawler(Robot):
         init_angles=None,
         smooth_segments=2,
         yaw_trim=0,
-        yaw_trim_interval=2,
+        yaw_trim_interval=4,
     ):
         """
         :param smooth_segments: XYZ midpoints between keyframes when do_step
             plays a pose list. 1 = original snap, 2 = one midpoint (default).
-        :param yaw_trim: counteract left/right drift on forward/backward.
-            +1 = robot pulls right when going forward → inject turn-left-angle
-            -1 = pulls left → inject turn-right-angle
-            0 = off (default). Magnitude = how many trim turns per interval.
-        :param yaw_trim_interval: apply trim every N forward/backward steps.
+        :param yaw_trim: degrees of yaw nudge on forward/backward (soft).
+            Positive = counteract right-drift (nudge left). Negative = nudge
+            right. 0 = off. Try 3–6; stock turn_left_angle is 30° and far
+            too strong for mild pull.
+        :param yaw_trim_interval: apply that micro-turn every N travel steps.
         """
         utils.reset_mcu()
         time.sleep(0.2)
@@ -62,7 +62,7 @@ class Picrawler(Robot):
 
         self.smooth_segments = max(1, int(smooth_segments))
         self._segments_override = None
-        self.yaw_trim = int(yaw_trim)
+        self.yaw_trim = float(yaw_trim)
         self.yaw_trim_interval = max(1, int(yaw_trim_interval))
         self.stand_position = 0
         self.direction = [
@@ -223,7 +223,7 @@ class Picrawler(Robot):
             self._segments_override = prev
 
     def _apply_yaw_trim(self, travel_motion, speed=50):
-        """Counteract left/right drift after a forward/backward step."""
+        """Counteract left/right drift with a small-degree turn_angle nudge."""
         if self.yaw_trim == 0:
             return
         # +trim ⇒ forward was pulling right ⇒ nudge left; backward gets the opposite
@@ -233,8 +233,14 @@ class Picrawler(Robot):
             trim_name = "turn right angle" if self.yaw_trim > 0 else "turn left angle"
         else:
             return
-        for _ in range(abs(self.yaw_trim)):
+        ml = self.move_list
+        old_angle = ml.angle
+        try:
+            # Stock turn_*_angle uses 30° — far too strong for drift fix
+            ml.angle = max(1.0, abs(self.yaw_trim))
             self._play_motion_once(trim_name, speed=speed)
+        finally:
+            ml.angle = old_angle
 
     def do_action(self, motion_name, step=1, speed=50):
         spaced = motion_name.replace("_", " ")
