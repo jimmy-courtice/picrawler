@@ -1,71 +1,60 @@
 #!/usr/bin/env python3
 """
-Demo using the *native* Picrawler API (symmetric stand + smooth segments).
+Thin runner for the native Picrawler defaults (edit MoveList in picrawler.py).
 
   cd ~/picrawler && git pull
   sudo pip3 install . --break-system-packages --no-build-isolation --no-deps
   sudo python3 -m smooth_gait.demo_crawl
-  sudo python3 examples/21_smooth_stand.py
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
 import time
-from pathlib import Path
-
-_ROOT = Path(__file__).resolve().parents[1]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--mode", choices=("crawl", "compare"), default="crawl")
     parser.add_argument("--cycles", type=int, default=3)
     parser.add_argument("--segments", type=int, default=2)
     parser.add_argument("--speed", type=int, default=100)
+    parser.add_argument(
+        "--mode",
+        choices=("crawl", "compare"),
+        default="crawl",
+        help="compare = 3 steps at segments=1 then 3 at your --segments",
+    )
     args = parser.parse_args()
-
-    if args.dry_run:
-        print("Dry-run: import check only")
-        from picrawler.picrawler import Picrawler as _P  # noqa: F401
-        print("Picrawler class OK (hardware not exercised)")
-        return 0
 
     from picrawler import Picrawler
 
     crawler = Picrawler(smooth_segments=args.segments)
     try:
-        print(f"1) Stand / symmetric rest  (smooth_segments={args.segments})")
+        print("stand (diagonal — defined in MoveList.stand)")
         crawler.do_step("stand", 50)
         time.sleep(0.8)
 
         if args.mode == "compare":
-            steps = 3
-            print(f"2) Stock-ish: temporarily segments=1, forward × {steps}")
+            print("stock-ish playback (segments=1) × 3")
             crawler.smooth_segments = 1
-            crawler.do_action("forward", steps, 60)
-            time.sleep(0.5)
-            print(f"3) Smooth: segments={args.segments}, forward × {steps}")
+            crawler.do_action("forward", 3, 60)
+            time.sleep(0.4)
+            print(f"smooth playback (segments={args.segments}) × 3")
             crawler.smooth_segments = args.segments
             crawler.do_step("stand", 50)
-            time.sleep(0.4)
-            crawler.do_action("forward", steps, args.speed)
+            time.sleep(0.3)
+            crawler.do_action("forward", 3, args.speed)
         else:
-            print(f"2) Forward × {args.cycles} @ speed {args.speed}")
+            print(f"forward × {args.cycles}")
             crawler.do_action("forward", args.cycles, args.speed)
 
-        print("3) Symmetric rest")
+        print("stand")
         crawler.do_step("stand", 50)
-        time.sleep(0.5)
+        time.sleep(0.4)
     except KeyboardInterrupt:
         print("\nInterrupted")
     finally:
         try:
-            print("4) Sit")
             crawler.do_step("sit", 50)
             time.sleep(0.3)
         except Exception:

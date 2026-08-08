@@ -1,41 +1,37 @@
 #!/usr/bin/env python3
 """
-Native Picrawler API with symmetric rest + XYZ-smoothed gait.
+Uses the replaced defaults in picrawler.py (diagonal stand + smooth playback).
+
+Customize by editing MoveList.stand / MoveList.forward in:
+  picrawler/picrawler.py
 
   sudo python3 examples/21_smooth_stand.py
-
-Picrawler(smooth_segments=2) makes do_step/do_action interpolate foot XYZ
-between keyframes. do_step('stand') ends with all legs at (45, 45, -50).
-do_action('forward') auto-transitions through the diagonal gait stance.
 """
 from time import sleep
 from picrawler import Picrawler
 
-# smooth_segments=1 → stock timing; 2 → one XYZ midpoint (default in this fork)
-crawler = Picrawler(smooth_segments=2)
+crawler = Picrawler(smooth_segments=2)  # 1 = stock snap between poses
 
 
 def main():
     try:
-        print("Stand (symmetric rest)")
+        print("stand (diagonal default)")
         crawler.do_step("stand", 50)
         sleep(1.0)
 
-        print("Forward × 3 (auto diagonal prep + smooth segments)")
+        print("forward × 3")
         crawler.do_action("forward", 3, 100)
-        sleep(0.4)
+        sleep(0.3)
 
-        print("Back to symmetric rest")
+        print("stand again")
         crawler.do_step("stand", 50)
-        sleep(0.6)
-
+        sleep(0.5)
     except KeyboardInterrupt:
         print("\nInterrupted")
     finally:
-        print("Sit")
         try:
             crawler.do_step("sit", 50)
-            sleep(0.4)
+            sleep(0.3)
         except Exception:
             pass
 

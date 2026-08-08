@@ -5,12 +5,17 @@ import time
 import math
 
 class Picrawler(Robot):
+    """
+    Customize motion by editing MoveList in this file — those definitions
+    *are* the defaults (stand, sit, forward, …). There is no parallel gait layer.
+
+    smooth_segments only changes playback (XYZ midpoints between keyframes).
+    """
     A = 48
     B = 78
     C = 33
     OFFSET_FILE = os.path.expanduser('~/.config/.picrawler.config')
     PIN_LIST = [9, 10, 11, 3, 4, 5, 0, 1, 2, 6, 7, 8]
-    # Motions that need the stock diagonal foot pattern before keyframes run
     _GAIT_MOTIONS = (
         "forward", "backward", "turn left", "turn right",
         "turn left angle", "turn right angle",
@@ -18,8 +23,8 @@ class Picrawler(Robot):
 
     def __init__(self, pin_list=PIN_LIST, init_angles=None, smooth_segments=2):
         """
-        :param smooth_segments: XYZ midpoints between gait keyframes.
-            1 = original stock timing (no extras), 2 = one midpoint (default).
+        :param smooth_segments: XYZ midpoints between keyframes when do_step
+            plays a pose list. 1 = original snap, 2 = one midpoint (default).
         """
         utils.reset_mcu()
         time.sleep(0.2)
@@ -31,7 +36,7 @@ class Picrawler(Robot):
             'my action': None
         }
 
-        # Lazy names only — do NOT evaluate stand/sit here (that left z_current stuck on sit).
+        # Names only — never pre-evaluate stand/sit (that stuck z_current on sit).
         self.step_list = {
             "stand": "stand",
             "sit": "sit",
@@ -48,7 +53,6 @@ class Picrawler(Robot):
 
         self.current_coord = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
         self.coord_temp = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
-        # Symmetric rest is the default standing height flag
         self.move_list.z_current = self.move_list.Z_DEFAULT
         self.move_list.ready_state = 1
 
@@ -150,52 +154,24 @@ class Picrawler(Robot):
         self.coord_temp = list.copy(coords)
         self.set_angle(angles_temp, speed, israise)
 
-    def diagonal_stance(self, speed=50):
-        """Stock gait-ready pose: RF/RR at Y=45, LF/LR at Y=0."""
-        ml = self.move_list
-        pose = [
-            [ml.X_DEFAULT, ml.Y_DEFAULT, ml.Z_DEFAULT],
-            [ml.X_DEFAULT, ml.Y_START, ml.Z_DEFAULT],
-            [ml.X_DEFAULT, ml.Y_START, ml.Z_DEFAULT],
-            [ml.X_DEFAULT, ml.Y_DEFAULT, ml.Z_DEFAULT],
-        ]
-        self.stand_position = 0
-        ml.stand_position = 0
-        ml.z_current = ml.Z_DEFAULT
-        ml.ready_state = 1
-        self.do_step(pose, speed=speed)
-
-    def is_symmetric_rest(self, tol=10):
-        """True when all four feet are near Y=Y_DEFAULT (symmetric stand)."""
-        y0 = self.move_list.Y_DEFAULT
-        return all(abs(leg[1] - y0) <= tol for leg in self.current_step_all_leg_value())
-
-    def ensure_gait_stance(self, speed=50):
-        """If resting symmetric, ease into diagonal before crawl keyframes."""
-        if self.is_symmetric_rest():
-            self.diagonal_stance(speed=speed)
-
     def do_action(self, motion_name, step=1, speed=50):
         try:
-            if motion_name in self._GAIT_MOTIONS:
-                # Symmetric rest → diagonal once, then run gait cycles
-                self.ensure_gait_stance(speed=min(speed, 80))
-            for _ in range(step): # times
+            for _ in range(step):
                 self.move_list.stand_position = self.stand_position
                 if motion_name in self._GAIT_MOTIONS:
                     self.stand_position = self.stand_position + 1 & 1
-                # Keep MoveList standing flag so @check_stand does not re-inject stand
+                # Keep standing flag so @check_stand does not re-inject stand frames
                 self.move_list.z_current = self.move_list.Z_DEFAULT
                 self.move_list.ready_state = 1
                 action = self.move_list[motion_name]
-                for _step in action: # spyder motion
+                for _step in action:
                     self.do_step(_step, speed=speed)
         except AttributeError:
             try:
                 for _ in range(step):
                     action_add = self.move_list_add[motion_name]
                     for _step in action_add:
-                        self.do_step(_step, speed=speed) 
+                        self.do_step(_step, speed=speed)
             except KeyError:
                 print("No such action")
 
@@ -315,7 +291,16 @@ class Picrawler(Robot):
 
 
     class MoveList(dict):
-        
+        """
+        === Customize poses/gaits HERE (these replace stock defaults) ===
+
+        Leg order each frame: [right front, left front, left rear, right rear]
+        Each leg is [x, y, z] in mm (local frame).
+
+        stand  — default rest / start / end pose (diagonal: RF/RR Y=45, LF/LR Y=0)
+        sit    — parked pose
+        forward / backward / turn_* — walk cycles; assume you are already in stand
+        """
         LENGTH_SIDE = 77
         X_DEFAULT = 45
         X_TURN = 70
@@ -404,41 +389,43 @@ class Picrawler(Robot):
                 return wrapper2
             return wrapper1
         
+        def _diagonal_pose(self, z):
+            """Default stance: RF/RR long (Y=45), LF/LR short (Y=0)."""
+            return [
+                [self.X_DEFAULT, self.Y_DEFAULT, z],
+                [self.X_DEFAULT, self.Y_START, z],
+                [self.X_DEFAULT, self.Y_START, z],
+                [self.X_DEFAULT, self.Y_DEFAULT, z],
+            ]
+
         @property
         @normal_action(0)
         def sit(self):
-            """Park with all legs at Y=45 (same XY as stand, higher Z)."""
+            """Park in the same diagonal footprint, feet raised (Z_UP)."""
             self.z_current = self.Z_UP
-            x, y, z = self.X_DEFAULT, self.Y_DEFAULT, self.z_current
-            return [[[x, y, z], [x, y, z], [x, y, z], [x, y, z]]]
-
+            return [self._diagonal_pose(self.z_current)]
 
         @property
         @normal_action(0)
         def stand(self):
-            """Rise into a symmetric rest: all legs at (X=45, Y=45, Z_DEFAULT)."""
+            """Default rest: diagonal stance at standing height."""
             _stand = []
-            if self.ready_state ==  0:
+            if self.ready_state == 0:
                 _stand += self.ready
             self.z_current = self.Z_DEFAULT
-            x, y, z = self.X_DEFAULT, self.Y_DEFAULT, self.z_current
-            def _frame(zf):
-                return [[x, y, zf], [x, y, zf], [x, y, zf], [x, y, zf]]
+            z = self.z_current
             _stand += [
-                _frame(z * 0.35),
-                _frame(z * 0.55),
-                _frame(z * 0.75),
-                _frame(z * 0.9),
-                _frame(z),
+                self._diagonal_pose(z * 0.35),
+                self._diagonal_pose(z * 0.55),
+                self._diagonal_pose(z * 0.75),
+                self._diagonal_pose(z * 0.9),
+                self._diagonal_pose(z),
             ]
             return _stand
         
         @property
         def ready(self):
-            # Symmetric ready pose (all legs at Y_DEFAULT)
-            z = self.z_current
-            x, y = self.X_DEFAULT, self.Y_DEFAULT
-            _ready = [[[x, y, z], [x, y, z], [x, y, z], [x, y, z]]]
+            _ready = [self._diagonal_pose(self.z_current)]
             self.ready_state = 1
             return _ready
           
