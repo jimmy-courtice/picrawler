@@ -10,9 +10,17 @@ class Picrawler(Robot):
     C = 33
     OFFSET_FILE = os.path.expanduser('~/.config/.picrawler.config')
     PIN_LIST = [9, 10, 11, 3, 4, 5, 0, 1, 2, 6, 7, 8]
+    # Motions that need the stock diagonal foot pattern before keyframes run
+    _GAIT_MOTIONS = (
+        "forward", "backward", "turn left", "turn right",
+        "turn left angle", "turn right angle",
+    )
 
-    def __init__(self, pin_list=PIN_LIST, init_angles=None):  
-
+    def __init__(self, pin_list=PIN_LIST, init_angles=None, smooth_segments=2):
+        """
+        :param smooth_segments: XYZ midpoints between gait keyframes.
+            1 = original stock timing (no extras), 2 = one midpoint (default).
+        """
         utils.reset_mcu()
         time.sleep(0.2)
 
@@ -23,11 +31,13 @@ class Picrawler(Robot):
             'my action': None
         }
 
+        # Lazy names only — do NOT evaluate stand/sit here (that left z_current stuck on sit).
         self.step_list = {
-            "stand": self.move_list['stand'],
-            "sit": self.move_list['sit'],
+            "stand": "stand",
+            "sit": "sit",
         }
 
+        self.smooth_segments = max(1, int(smooth_segments))
         self.stand_position = 0
         self.direction = [
             1,1,-1,
@@ -38,6 +48,9 @@ class Picrawler(Robot):
 
         self.current_coord = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
         self.coord_temp = [[60, 0, -30], [60, 0, -30], [60, 0, -30], [60, 0, -30]]
+        # Symmetric rest is the default standing height flag
+        self.move_list.z_current = self.move_list.Z_DEFAULT
+        self.move_list.ready_state = 1
 
     def coord2polar(self, coord):
         x,y,z = coord
@@ -123,12 +136,57 @@ class Picrawler(Robot):
         # print('output: %s'%[alpha,beta,gamma])
         return limit_flag,[alpha,beta,gamma]
 
+    def _lerp_point(self, a, b, t):
+        return [a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                a[2] + (b[2] - a[2]) * t]
+
+    def _do_step_raw(self, coords, speed=50, israise=False):
+        """Single pose → IK → servos (no segment interpolation)."""
+        angles_temp = []
+        for coord in coords:
+            alpha, beta, gamma = self.coord2polar(coord)
+            angles_temp.append([beta, alpha, gamma])
+        self.coord_temp = list.copy(coords)
+        self.set_angle(angles_temp, speed, israise)
+
+    def diagonal_stance(self, speed=50):
+        """Stock gait-ready pose: RF/RR at Y=45, LF/LR at Y=0."""
+        ml = self.move_list
+        pose = [
+            [ml.X_DEFAULT, ml.Y_DEFAULT, ml.Z_DEFAULT],
+            [ml.X_DEFAULT, ml.Y_START, ml.Z_DEFAULT],
+            [ml.X_DEFAULT, ml.Y_START, ml.Z_DEFAULT],
+            [ml.X_DEFAULT, ml.Y_DEFAULT, ml.Z_DEFAULT],
+        ]
+        self.stand_position = 0
+        ml.stand_position = 0
+        ml.z_current = ml.Z_DEFAULT
+        ml.ready_state = 1
+        self.do_step(pose, speed=speed)
+
+    def is_symmetric_rest(self, tol=10):
+        """True when all four feet are near Y=Y_DEFAULT (symmetric stand)."""
+        y0 = self.move_list.Y_DEFAULT
+        return all(abs(leg[1] - y0) <= tol for leg in self.current_step_all_leg_value())
+
+    def ensure_gait_stance(self, speed=50):
+        """If resting symmetric, ease into diagonal before crawl keyframes."""
+        if self.is_symmetric_rest():
+            self.diagonal_stance(speed=speed)
+
     def do_action(self, motion_name, step=1, speed=50):
         try:
+            if motion_name in self._GAIT_MOTIONS:
+                # Symmetric rest → diagonal once, then run gait cycles
+                self.ensure_gait_stance(speed=min(speed, 80))
             for _ in range(step): # times
                 self.move_list.stand_position = self.stand_position
-                if motion_name in ["forward", "backward", "turn left", "turn right", "turn left angle", "turn right angle"]:
+                if motion_name in self._GAIT_MOTIONS:
                     self.stand_position = self.stand_position + 1 & 1
+                # Keep MoveList standing flag so @check_stand does not re-inject stand
+                self.move_list.z_current = self.move_list.Z_DEFAULT
+                self.move_list.ready_state = 1
                 action = self.move_list[motion_name]
                 for _step in action: # spyder motion
                     self.do_step(_step, speed=speed)
@@ -170,23 +228,31 @@ class Picrawler(Robot):
 
     def do_step(self, _step, speed=50, israise=False):
         if isinstance(_step, str):
-            if _step in self.step_list.keys():
-                for one_step in self.step_list[_step]:
-                    angles_temp = []
-                    for coord in one_step: # each servo motion    
-                        alpha, beta, gamma = self.coord2polar(coord)
-                        angles_temp.append([beta, alpha, gamma])
-                    self.coord_temp = list.copy(one_step)
-                    self.set_angle(angles_temp, speed, israise)
+            if _step in ("stand", "sit"):
+                # Fresh evaluate so stand/sit always match current MoveList definition
+                frames = self.move_list[_step]
+                for one_step in frames:
+                    self.do_step(one_step, speed=speed, israise=israise)
+                if _step == "stand":
+                    self.move_list.z_current = self.move_list.Z_DEFAULT
+                    self.move_list.ready_state = 1
+                    self.stand_position = 0
+                    self.move_list.stand_position = 0
+                else:
+                    self.move_list.z_current = self.move_list.Z_UP
             else:
                 print("The name of gait is not in the default gait dictionary")
         elif isinstance(_step, list):
-            angles_temp = []
-            for coord in _step: # each servo motion    
-                alpha, beta, gamma = self.coord2polar(coord)
-                angles_temp.append([beta, alpha, gamma])
-            self.coord_temp = list.copy(_step)
-            self.set_angle(angles_temp, speed, israise)
+            segs = self.smooth_segments
+            if segs <= 1:
+                self._do_step_raw(_step, speed=speed, israise=israise)
+                return
+            start = self.current_step_all_leg_value()
+            end = [list(map(float, leg)) for leg in _step]
+            for i in range(1, segs + 1):
+                t = i / float(segs)
+                mid = [self._lerp_point(start[j], end[j], t) for j in range(4)]
+                self._do_step_raw(mid, speed=speed, israise=israise)
         else:
             print("The \"_step\" parameter is wrong.")
             return
@@ -341,75 +407,38 @@ class Picrawler(Robot):
         @property
         @normal_action(0)
         def sit(self):
+            """Park with all legs at Y=45 (same XY as stand, higher Z)."""
             self.z_current = self.Z_UP
-            return [[
-                [self.X_DEFAULT,self.Y_DEFAULT,self.z_current],
-                [self.X_TURN,self.Y_START,self.z_current],
-                [self.X_TURN,self.Y_START,self.z_current],
-                [self.X_DEFAULT,self.Y_DEFAULT,self.z_current],
-            ]]
-            
+            x, y, z = self.X_DEFAULT, self.Y_DEFAULT, self.z_current
+            return [[[x, y, z], [x, y, z], [x, y, z], [x, y, z]]]
+
 
         @property
         @normal_action(0)
         def stand(self):
+            """Rise into a symmetric rest: all legs at (X=45, Y=45, Z_DEFAULT)."""
             _stand = []
             if self.ready_state ==  0:
                 _stand += self.ready
             self.z_current = self.Z_DEFAULT
-            # _stand += [[
-            #     [self.X_DEFAULT,self.Y_DEFAULT,self.z_current],
-            #     [self.X_DEFAULT,self.Y_START,self.z_current],
-            #     [self.X_DEFAULT,self.Y_START,self.z_current],
-            #     [self.X_DEFAULT,self.Y_DEFAULT,self.z_current],
-            # ]]
-            # return _stand
-           
-            # _stand += [
-            #     # [[self.X_DEFAULT,self.Y_DEFAULT,self.z_current/3],[self.X_DEFAULT,self.Y_START,self.z_current/3],[self.X_DEFAULT,self.Y_START,self.z_current/3],[self.X_DEFAULT,self.Y_DEFAULT,self.z_current/3]],
-            #     # [[self.X_DEFAULT,self.Y_DEFAULT,self.z_current*2/3],[self.X_DEFAULT,self.Y_START,self.z_current*2/3],[self.X_DEFAULT,self.Y_START,self.z_current*2/3],[self.X_DEFAULT,self.Y_DEFAULT,self.z_current*2/3]],
-            #     [[self.X_DEFAULT,self.Y_DEFAULT,self.z_current/2],[self.X_DEFAULT,self.Y_START,self.z_current/2],[self.X_DEFAULT,self.Y_START,self.z_current*2],[self.X_DEFAULT,self.Y_DEFAULT,self.z_current*2/3]],
-            #     [[self.X_DEFAULT,self.Y_DEFAULT,self.z_current],[self.X_DEFAULT,self.Y_START,self.z_current],[self.X_DEFAULT,self.Y_START,self.z_current],[self.X_DEFAULT,self.Y_DEFAULT,self.z_current]],
-            # ]
-            # return _stand
-        
-
+            x, y, z = self.X_DEFAULT, self.Y_DEFAULT, self.z_current
+            def _frame(zf):
+                return [[x, y, zf], [x, y, zf], [x, y, zf], [x, y, zf]]
             _stand += [
-                [[self.X_DEFAULT,self.Y_DEFAULT,self.z_current*0.35],
-                [self.X_DEFAULT,self.Y_START,  self.z_current*0.35],
-                [self.X_DEFAULT,self.Y_START,  self.z_current*0.35],
-                [self.X_DEFAULT,self.Y_DEFAULT,self.z_current*0.35]],
-
-                [[self.X_DEFAULT,self.Y_DEFAULT,self.z_current*0.55],
-                [self.X_DEFAULT,self.Y_START,  self.z_current*0.55],
-                [self.X_DEFAULT,self.Y_START,  self.z_current*0.55],
-                [self.X_DEFAULT,self.Y_DEFAULT,self.z_current*0.55]],
-
-                [[self.X_DEFAULT,self.Y_DEFAULT,self.z_current*0.75],
-                [self.X_DEFAULT,self.Y_START,  self.z_current*0.75],
-                [self.X_DEFAULT,self.Y_START,  self.z_current*0.75],
-                [self.X_DEFAULT,self.Y_DEFAULT,self.z_current*0.75]],
-
-                [[self.X_DEFAULT,self.Y_DEFAULT,self.z_current*0.9],
-                [self.X_DEFAULT,self.Y_START,  self.z_current*0.9],
-                [self.X_DEFAULT,self.Y_START,  self.z_current*0.9],
-                [self.X_DEFAULT,self.Y_DEFAULT,self.z_current*0.9]],
-
-                [[self.X_DEFAULT,self.Y_DEFAULT,self.z_current],
-                [self.X_DEFAULT,self.Y_START,  self.z_current],
-                [self.X_DEFAULT,self.Y_START,  self.z_current],
-                [self.X_DEFAULT,self.Y_DEFAULT,self.z_current]],
+                _frame(z * 0.35),
+                _frame(z * 0.55),
+                _frame(z * 0.75),
+                _frame(z * 0.9),
+                _frame(z),
             ]
             return _stand
         
         @property
         def ready(self):
-            _ready = [[
-                [self.X_DEFAULT,self.Y_DEFAULT,self.z_current],
-                [self.X_TURN,self.Y_START,self.z_current],
-                [self.X_TURN,self.Y_START,self.z_current],
-                [self.X_DEFAULT,self.Y_DEFAULT,self.z_current],
-            ]]
+            # Symmetric ready pose (all legs at Y_DEFAULT)
+            z = self.z_current
+            x, y = self.X_DEFAULT, self.Y_DEFAULT
+            _ready = [[[x, y, z], [x, y, z], [x, y, z], [x, y, z]]]
             self.ready_state = 1
             return _ready
           
