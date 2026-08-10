@@ -8,6 +8,10 @@ SPEED_MIN = 50
 SPEED_MAX = 90
 speed = 70
 
+YAW_TRIM_MIN = -15.0
+YAW_TRIM_MAX = 15.0
+YAW_TRIM_STEP = 0.5
+
 STEP = 1            # Number of action steps per key press
 ACTION_GAP = 0.25   # Delay after each action to reduce current spikes
 
@@ -20,9 +24,15 @@ Movement:
   S: Backward
   D: Turn right
 
-Speed Control:
+Speed:
   + / ] : Increase speed
   - / [ : Decrease speed
+
+Yaw trim (walk steer bias):
+  , / < : Decrease trim (more right / less left)
+  . / > : Increase trim (more left / less right)
+  Y     : Save trim to ~/.config/picrawler_yaw_trim
+  0     : Reset trim to 0 (session only until you save)
 
 Other:
   Space  : Stop (no action)
@@ -37,13 +47,22 @@ def show_info():
     """Clear terminal and display control instructions."""
     print("\033[H\033[J", end="")  # Clear terminal screen
     print(manual)
+    saved = Picrawler.load_yaw_trim()
     print(f"Current speed: {speed}  (range {SPEED_MIN}-{SPEED_MAX})")
+    print(f"Yaw trim: {crawler.yaw_trim:g}  (saved: {saved:g})")
     print(f"Action gap: {ACTION_GAP:.2f}s")
 
 def do_move(action_name):
     """Execute movement action with safety delay."""
     crawler.do_action(action_name, STEP, speed)
     sleep(ACTION_GAP)
+
+def nudge_yaw(delta):
+    crawler.yaw_trim = clamp(
+        crawler.yaw_trim + delta,
+        YAW_TRIM_MIN,
+        YAW_TRIM_MAX,
+    )
 
 def safe_sit():
     """Safely sit down before program exit."""
@@ -70,20 +89,28 @@ def main():
             elif k == "d":
                 do_move("turn right")
 
-            # Speed increase
             elif k in ("+", "]"):
                 global speed
                 speed = clamp(speed + 5, SPEED_MIN, SPEED_MAX)
 
-            # Speed decrease
             elif k in ("-", "["):
                 speed = clamp(speed - 5, SPEED_MIN, SPEED_MAX)
 
-            # Stop (no movement)
+            elif k in (",", "<"):
+                nudge_yaw(-YAW_TRIM_STEP)
+
+            elif k in (".", ">"):
+                nudge_yaw(YAW_TRIM_STEP)
+
+            elif k == "y":
+                crawler.save_yaw_trim()
+
+            elif k == "0":
+                crawler.yaw_trim = 0.0
+
             elif k == " ":
                 pass
 
-            # Quit using readchar special key
             elif key == readchar.key.CTRL_C:
                 print("\nQuit.")
                 break
