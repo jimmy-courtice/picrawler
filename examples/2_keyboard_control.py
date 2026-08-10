@@ -43,13 +43,19 @@ def clamp(value, min_value, max_value):
     """Limit value within a specified range."""
     return max(min_value, min(max_value, value))
 
+def yaw_trim_supported():
+    return hasattr(crawler, "yaw_trim") and hasattr(Picrawler, "load_yaw_trim")
+
 def show_info():
     """Clear terminal and display control instructions."""
     print("\033[H\033[J", end="")  # Clear terminal screen
     print(manual)
-    saved = Picrawler.load_yaw_trim()
     print(f"Current speed: {speed}  (range {SPEED_MIN}-{SPEED_MAX})")
-    print(f"Yaw trim: {crawler.yaw_trim:g}  (saved: {saved:g})")
+    if yaw_trim_supported():
+        saved = Picrawler.load_yaw_trim()
+        print(f"Yaw trim: {crawler.yaw_trim:g}  (saved: {saved:g})")
+    else:
+        print("Yaw trim: unavailable — reinstall picrawler from smooth-gait")
     print(f"Action gap: {ACTION_GAP:.2f}s")
 
 def do_move(action_name):
@@ -97,16 +103,20 @@ def main():
                 speed = clamp(speed - 5, SPEED_MIN, SPEED_MAX)
 
             elif k in (",", "<"):
-                nudge_yaw(-YAW_TRIM_STEP)
+                if yaw_trim_supported():
+                    nudge_yaw(-YAW_TRIM_STEP)
 
             elif k in (".", ">"):
-                nudge_yaw(YAW_TRIM_STEP)
+                if yaw_trim_supported():
+                    nudge_yaw(YAW_TRIM_STEP)
 
             elif k == "y":
-                crawler.save_yaw_trim()
+                if yaw_trim_supported():
+                    crawler.save_yaw_trim()
 
             elif k == "0":
-                crawler.yaw_trim = 0.0
+                if yaw_trim_supported():
+                    crawler.yaw_trim = 0.0
 
             elif k == " ":
                 pass
