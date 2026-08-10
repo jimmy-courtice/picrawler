@@ -16,6 +16,8 @@ class Picrawler(Robot):
     B = 78
     C = 33
     OFFSET_FILE = os.path.expanduser('~/.config/.picrawler.config')
+    # Machine-specific walk steer (same idea as servo cali — not a code default)
+    YAW_TRIM_FILE = os.path.expanduser('~/.config/picrawler_yaw_trim')
     PIN_LIST = [9, 10, 11, 3, 4, 5, 0, 1, 2, 6, 7, 8]
     _GAIT_MOTIONS = frozenset({
         "forward", "backward", "turn left", "turn right",
@@ -27,20 +29,42 @@ class Picrawler(Robot):
     # Skip XYZ midpoints when max foot travel is below this (mm)
     _TINY_POSE_DELTA_MM = 3.0
 
+    @classmethod
+    def load_yaw_trim(cls):
+        """Read persisted yaw trim from YAW_TRIM_FILE (0 if missing/invalid)."""
+        try:
+            with open(cls.YAW_TRIM_FILE, "r", encoding="utf-8") as f:
+                return float(f.read().strip().split()[0])
+        except (OSError, ValueError, IndexError):
+            return 0.0
+
+    def save_yaw_trim(self, value=None):
+        """Persist yaw trim for this robot (default: current self.yaw_trim)."""
+        if value is not None:
+            self.yaw_trim = float(value)
+        path = self.YAW_TRIM_FILE
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("%s\n" % self.yaw_trim)
+        return self.yaw_trim
+
     def __init__(
         self,
         pin_list=PIN_LIST,
         init_angles=None,
         smooth_segments=2,
-        yaw_trim=0,
+        yaw_trim=None,
         yaw_trim_interval=None,
     ):
         """
         :param smooth_segments: XYZ midpoints between keyframes when do_step
             plays a pose list. 1 = original snap, 2 = one midpoint (default).
-        :param yaw_trim: left/right steer strength on forward/backward.
+        :param yaw_trim: left/right steer on forward/backward. None (default)
+            loads from ~/.config/picrawler_yaw_trim if present, else 0.
+            Pass an explicit number to override for this session only.
             Positive = steer left (if it pulls right). Negative = steer right.
-            0 = off. Typical useful range 2–5 after the stronger bias path.
         :param yaw_trim_interval: ignored (kept for old call sites).
         """
         utils.reset_mcu()
@@ -61,7 +85,10 @@ class Picrawler(Robot):
 
         self.smooth_segments = max(1, int(smooth_segments))
         self._segments_override = None
-        self.yaw_trim = float(yaw_trim)
+        if yaw_trim is None:
+            self.yaw_trim = self.load_yaw_trim()
+        else:
+            self.yaw_trim = float(yaw_trim)
         self.yaw_trim_interval = yaw_trim_interval  # unused
         self.stand_position = 0
         self.direction = [
